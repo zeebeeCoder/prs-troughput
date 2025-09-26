@@ -25,17 +25,20 @@ A comprehensive CLI tool for collecting Pull Request throughput metrics from Git
 ### Basic Commands
 
 ```bash
-# Default: Analyze last 14 days, all repositories
+# Default: Analyze last 14 days, default organization
 python3 pr_metrics.py
 
-# Analyze last 7 days
-python3 pr_metrics.py --days 7
+# Analyze different organization
+python3 pr_metrics.py --org "microsoft"
 
-# Test with first 5 repositories only
-python3 pr_metrics.py --limit 5
+# Analyze last 7 days for specific org
+python3 pr_metrics.py --org "google" --days 7
+
+# Test with minimum repo filter
+python3 pr_metrics.py --min-prs 5
 
 # Weekly sprint analysis
-python3 pr_metrics.py --days 7 --limit 10
+python3 pr_metrics.py --org "your-org" --days 7 --min-prs 1
 ```
 
 ### Command Line Options
@@ -43,7 +46,11 @@ python3 pr_metrics.py --days 7 --limit 10
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--days` | 14 | Number of days back to analyze |
-| `--limit` | None | Limit number of repositories to process |
+| `--min-prs` | 3 | Minimum PRs required to include repo in report |
+| `--org` | Eve-World-Platform | GitHub organization to analyze |
+| `--full-scan` | False | Process all repos instead of just active ones |
+| `--report` | False | Generate report from existing data |
+| `--terminal` | False | Generate terminal-friendly report with rich styling |
 
 ## Metrics Collected
 
@@ -75,16 +82,17 @@ python3 pr_metrics.py --days 7 --limit 10
 Real-time progress with summary metrics for each repository and organization totals.
 
 ### JSON Reports
-Timestamped JSON files saved to `output/` directory:
+Timestamped data files saved to `output/` directory:
 ```
-output/pr_metrics_eve-world-platform_20250925_081334.json
+output/pr_data_your-org-name_20250925_081334.parquet
+output/pr_data_your-org-name_20250925_081334.csv
 ```
 
 #### Report Structure
 ```json
 {
   "metadata": {
-    "org": "Eve-World-Platform",
+    "org": "your-organization-name",
     "generated_at": "2025-09-25T08:13:25",
     "days_analyzed": 14,
     "total_repos_in_org": 100
@@ -107,32 +115,74 @@ output/pr_metrics_eve-world-platform_20250925_081334.json
 }
 ```
 
-## Configuration
+## Organization Configuration
 
-To analyze a different organization, edit the `ORG` variable in `pr_metrics.py`:
-```python
-ORG = "your-org-name"
+### Multiple Ways to Set Organization
+
+1. **Command Line Flag** (highest priority):
+```bash
+python3 pr_metrics.py --org "your-org-name"
+```
+
+2. **Environment Variable**:
+```bash
+export PR_METRICS_ORG="your-org-name"
+python3 pr_metrics.py
+```
+
+3. **Default Fallback**: Eve-World-Platform (if no override specified)
+
+### Advanced Usage
+
+```bash
+# Generate reports from existing data for specific org
+python3 pr_metrics.py --report --org "microsoft" --terminal
+
+# Compare different time periods for same org
+python3 pr_metrics.py --org "google" --days 30
+python3 pr_metrics.py --org "google" --days 7
+
+# Environment variable with override
+export PR_METRICS_ORG="default-org"
+python3 pr_metrics.py                    # Uses default-org
+python3 pr_metrics.py --org "temp-org"   # Uses temp-org
 ```
 
 ## Example Output
 
 ```
-🔍 Collecting PR metrics for Eve-World-Platform (last 14 days)...
-📁 Found 100 repositories, processing 3
+🔍 Collecting PR metrics for microsoft (last 14 days)...
+🎯 Found 15 repositories with recent PR activity
 
-📊 Processing coto_backend (1/3)...
-   📈 30 PRs (24 merged, 80.0% rate)
-   👥 Top authors: {'srikar-samudrala': 16, 'nopanz': 4}
-   ⏱️  Avg merge: 3.09h, First review: 1.91h
-   📏 Avg PR size: 634 lines (5.1 commits)
+  1/15: typescript
+  2/15: vscode
+  3/15: PowerToys
 
-🎯 ORG SUMMARY (Eve-World-Platform) - Last 14 days:
-   Total PRs: 64
-   Merged: 50 (78.1%)
-   Daily throughput: 3.57 merged PRs/day
+🎯 RESULTS:
+   Total PRs: 127
+   Merged: 98 (77.2%)
+   Daily throughput: 7.0 PRs/day
+   Avg PR size: 423 lines
+   Avg time to merge: 4.2 hours
+   Top authors: {'user1': 23, 'user2': 18, 'user3': 15}
 
-💾 Report saved to: output/pr_metrics_eve-world-platform_20250925_081334.json
+💾 Data saved:
+   output/pr_data_microsoft_20250926_143021.parquet
+   output/pr_data_microsoft_20250926_143021.csv
 ```
+
+### Rich Terminal Reports
+
+```bash
+# Generate enhanced terminal report
+python3 pr_metrics.py --report --org "microsoft" --terminal
+```
+
+Displays interactive dashboard with:
+- Organization-specific metrics
+- Visual progress bars
+- Color-coded success rates
+- Weekly trend analysis
 
 ## Use Cases
 

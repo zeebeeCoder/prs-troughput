@@ -19,8 +19,26 @@ from rich.layout import Layout
 from rich import box
 from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 
-ORG = "Eve-World-Platform"
 OUTPUT_DIR = "output"
+
+def resolve_org(args_org=None):
+    """Resolve organization from multiple sources with priority"""
+    import os
+
+    # Priority: CLI arg > env var > hardcoded default
+    if args_org:
+        return args_org
+
+    env_org = os.getenv('PR_METRICS_ORG')
+    if env_org:
+        return env_org
+
+    # Default fallback
+    return "Eve-World-Platform"
+
+def sanitize_org_name(org_name):
+    """Sanitize org name for safe filesystem usage"""
+    return org_name.lower().replace(' ', '-').replace('_', '-')
 
 def run_gh_command(cmd):
     """Run gh CLI command and return JSON result"""
@@ -31,21 +49,21 @@ def run_gh_command(cmd):
         print(f"Error: {e.stderr}")
         return []
 
-def get_org_repos():
+def get_org_repos(org):
     """Get all active repositories in the org (exclude archived and forks)"""
-    cmd = f"gh repo list {ORG} --json name --no-archived --source --limit 100"
+    cmd = f"gh repo list {org} --json name --no-archived --source --limit 100"
     return run_gh_command(cmd)
 
-def get_active_repos_from_search(days_back=14):
+def get_active_repos_from_search(org, days_back=14):
     """Get repositories that have had PR activity in the specified time period"""
     since_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
-    cmd = f'gh search prs --owner {ORG} --created ">={since_date}" --json repository --limit 1000'
+    cmd = f'gh search prs --owner {org} --created ">={since_date}" --json repository --limit 1000'
 
     try:
         prs_data = run_gh_command(cmd)
         if not prs_data:
             print("⚠️  No PRs found via search, falling back to full repo scan")
-            return get_org_repos()
+            return get_org_repos(org)
 
         # Extract unique repository names
         repo_names = set()
@@ -61,13 +79,13 @@ def get_active_repos_from_search(days_back=14):
 
     except Exception as e:
         print(f"⚠️  Search failed ({e}), falling back to full repo scan")
-        return get_org_repos()
+        return get_org_repos(org)
 
-def get_repo_prs(repo_name, days_back=14):
+def get_repo_prs(org, repo_name, days_back=14):
     """Get PRs for a repository from the last N days"""
     since_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
     # Don't use --search as it's unreliable; filter in post-processing instead
-    cmd = f'gh pr list --repo {ORG}/{repo_name} --state all --json number,author,title,createdAt,mergedAt,closedAt,reviewDecision,additions,deletions,isDraft,labels --limit 200'
+    cmd = f'gh pr list --repo {org}/{repo_name} --state all --json number,author,title,createdAt,mergedAt,closedAt,reviewDecision,additions,deletions,isDraft,labels --limit 200'
     all_prs = run_gh_command(cmd)
 
     # Filter PRs by date in post-processing
@@ -80,7 +98,7 @@ def get_repo_prs(repo_name, days_back=14):
 
     return filtered_prs
 
-def process_prs_to_dataframe(all_prs_data):
+def process_prs_to_dataframe(all_prs_data, org):
     """Transform all PR data into a single pandas DataFrame"""
     rows = []
 
@@ -103,6 +121,7 @@ def process_prs_to_dataframe(all_prs_data):
             labels = ','.join([l.get('name', '') for l in pr.get('labels', [])])
 
             rows.append({
+                'org': org,
                 'repo': repo_name,
                 'pr_number': pr.get('number'),
                 'author': author,
@@ -120,12 +139,18 @@ def process_prs_to_dataframe(all_prs_data):
 
     return pd.DataFrame(rows)
 
-def load_latest_data():
-    """Load most recent parquet file"""
-    files = sorted(Path(OUTPUT_DIR).glob("*.parquet"))
+def load_latest_data(org=None):
+    """Load most recent parquet file, optionally filtered by org"""
+    if org:
+        sanitized_org = sanitize_org_name(org)
+        pattern = f"pr_data_{sanitized_org}_*.parquet"
+        files = sorted(Path(OUTPUT_DIR).glob(pattern))
+    else:
+        files = sorted(Path(OUTPUT_DIR).glob("pr_data_*.parquet"))
+
     return pd.read_parquet(files[-1]) if files else None
 
-def generate_rich_terminal_report(df):
+def generate_rich_terminal_report(df, org=None):
     """Generate rich terminal-styled report with enhanced UX"""
     if df is None or df.empty:
         console = Console()
@@ -144,8 +169,14 @@ def generate_rich_terminal_report(df):
     merged_prs = len(df[df['state'] == 'merged'])
     merge_rate = (merged_prs / total_prs * 100) if total_prs > 0 else 0
 
+    # Get org from data if not provided
+    if org is None and 'org' in df.columns:
+        org = df['org'].iloc[0]
+
+    org_display = f" - {org}" if org else ""
+
     # Header panel
-    header_text = f"""[bold blue]PR Metrics Dashboard[/bold blue]
+    header_text = f"""[bold blue]PR Metrics Dashboard{org_display}[/bold blue]
 Generated: [dim]{datetime.now().strftime('%Y-%m-%d %H:%M')}[/dim]
 
 [green]Data Scope:[/green]
@@ -324,7 +355,7 @@ Generated: [dim]{datetime.now().strftime('%Y-%m-%d %H:%M')}[/dim]
 
     console.print(Panel(tips_text, title="📋 Insights", border_style="dim"))
 
-def generate_markdown_report(df):
+def generate_markdown_report(df, org=None):
     """Generate comprehensive markdown report with detailed analytics"""
     if df is None or df.empty:
         print("No data available for reporting")
@@ -340,7 +371,13 @@ def generate_markdown_report(df):
     merged_prs = len(df[df['state'] == 'merged'])
     merge_rate = (merged_prs / total_prs * 100) if total_prs > 0 else 0
 
-    print("# PR Metrics Report")
+    # Get org from data if not provided
+    if org is None and 'org' in df.columns:
+        org = df['org'].iloc[0]
+
+    org_display = f" - {org}" if org else ""
+
+    print(f"# PR Metrics Report{org_display}")
     print(f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}*\n")
 
     print("## Data Scope")
@@ -452,34 +489,38 @@ def main():
     parser.add_argument('--full-scan', action='store_true', help='Process all repos instead of just active ones (slower, may hit rate limits)')
     parser.add_argument('--report', action='store_true', help='Generate report from existing data')
     parser.add_argument('--terminal', action='store_true', help='Generate terminal-friendly report with rich styling')
+    parser.add_argument('--org', type=str, help='GitHub organization to analyze (overrides default)')
     args = parser.parse_args()
+
+    # Resolve organization from CLI args, env var, or default
+    org = resolve_org(args.org)
 
     if args.report:
         if args.terminal:
-            generate_rich_terminal_report(load_latest_data())
+            generate_rich_terminal_report(load_latest_data(org), org)
         else:
-            generate_markdown_report(load_latest_data())
+            generate_markdown_report(load_latest_data(org), org)
         return
 
-    print(f"🔍 Collecting PR metrics for {ORG} (last {args.days} days)")
+    print(f"🔍 Collecting PR metrics for {org} (last {args.days} days)")
 
     # Get repos - active repos by default, full scan if requested
     if args.full_scan:
-        repos = get_org_repos()
+        repos = get_org_repos(org)
         print(f"📁 Processing {len(repos)} repositories (full scan)")
     else:
-        repos = get_active_repos_from_search(args.days)
+        repos = get_active_repos_from_search(org, args.days)
 
     all_prs_data = {}
     for i, repo in enumerate(repos, 1):
         repo_name = repo['name']
         print(f"  {i}/{len(repos)}: {repo_name}")
-        prs = get_repo_prs(repo_name, args.days)
+        prs = get_repo_prs(org, repo_name, args.days)
         if prs:
             all_prs_data[repo_name] = prs
 
     # Convert to DataFrame
-    df = process_prs_to_dataframe(all_prs_data)
+    df = process_prs_to_dataframe(all_prs_data, org)
 
     if df.empty:
         print("No PR data found")
@@ -518,9 +559,10 @@ def main():
     # Save data
     Path(OUTPUT_DIR).mkdir(exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    sanitized_org = sanitize_org_name(org)
 
-    parquet_file = f"{OUTPUT_DIR}/pr_data_{ORG.lower()}_{timestamp}.parquet"
-    csv_file = f"{OUTPUT_DIR}/pr_data_{ORG.lower()}_{timestamp}.csv"
+    parquet_file = f"{OUTPUT_DIR}/pr_data_{sanitized_org}_{timestamp}.parquet"
+    csv_file = f"{OUTPUT_DIR}/pr_data_{sanitized_org}_{timestamp}.csv"
 
     df.to_parquet(parquet_file, index=False)
     df.to_csv(csv_file, index=False)

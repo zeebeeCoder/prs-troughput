@@ -10,6 +10,14 @@ import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
 from tabulate import tabulate
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.text import Text
+from rich.columns import Columns
+from rich.layout import Layout
+from rich import box
+from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 
 ORG = "Eve-World-Platform"
 OUTPUT_DIR = "output"
@@ -58,8 +66,19 @@ def get_active_repos_from_search(days_back=14):
 def get_repo_prs(repo_name, days_back=14):
     """Get PRs for a repository from the last N days"""
     since_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
-    cmd = f'gh pr list --repo {ORG}/{repo_name} --state all --json number,author,title,createdAt,mergedAt,closedAt,reviewDecision,additions,deletions,commits,reviews,isDraft,labels --search "created:>={since_date}"'
-    return run_gh_command(cmd)
+    # Don't use --search as it's unreliable; filter in post-processing instead
+    cmd = f'gh pr list --repo {ORG}/{repo_name} --state all --json number,author,title,createdAt,mergedAt,closedAt,reviewDecision,additions,deletions,isDraft,labels --limit 200'
+    all_prs = run_gh_command(cmd)
+
+    # Filter PRs by date in post-processing
+    filtered_prs = []
+    for pr in all_prs:
+        if pr.get('createdAt'):
+            pr_date = pr['createdAt'][:10]  # Get YYYY-MM-DD part
+            if pr_date >= since_date:
+                filtered_prs.append(pr)
+
+    return filtered_prs
 
 def process_prs_to_dataframe(all_prs_data):
     """Transform all PR data into a single pandas DataFrame"""
@@ -77,12 +96,8 @@ def process_prs_to_dataframe(all_prs_data):
             pr_size = (pr.get('additions', 0) or 0) + (pr.get('deletions', 0) or 0)
             time_to_merge = (merged_at - created_at).total_seconds() / 3600 if merged_at and created_at else None
 
-            reviews = pr.get('reviews', [])
+            # Reviews data might not be available
             time_to_first_review = None
-            if reviews and created_at:
-                first_review_at = pd.to_datetime(reviews[0].get('submittedAt'))
-                if first_review_at:
-                    time_to_first_review = (first_review_at - created_at).total_seconds() / 3600
 
             state = 'merged' if merged_at else ('closed' if closed_at else 'open')
             labels = ','.join([l.get('name', '') for l in pr.get('labels', [])])
@@ -95,8 +110,8 @@ def process_prs_to_dataframe(all_prs_data):
                 'merged_at': merged_at,
                 'state': state,
                 'pr_size': pr_size,
-                'commits': len(pr.get('commits', [])),
-                'reviews': len(reviews),
+                'commits': 0,  # Not available without commits field
+                'reviews': 0,  # Not available without reviews field
                 'time_to_merge_hours': time_to_merge,
                 'time_to_first_review_hours': time_to_first_review,
                 'is_draft': pr.get('isDraft', False),
@@ -109,6 +124,205 @@ def load_latest_data():
     """Load most recent parquet file"""
     files = sorted(Path(OUTPUT_DIR).glob("*.parquet"))
     return pd.read_parquet(files[-1]) if files else None
+
+def generate_rich_terminal_report(df):
+    """Generate rich terminal-styled report with enhanced UX"""
+    if df is None or df.empty:
+        console = Console()
+        console.print("[red]No data available for reporting[/red]")
+        return
+
+    console = Console()
+
+    # Report header with context
+    date_range_start = df['created_at'].min().strftime('%Y-%m-%d')
+    date_range_end = df['created_at'].max().strftime('%Y-%m-%d')
+    unique_repos = df['repo'].nunique()
+    unique_authors = df['author'].nunique()
+
+    total_prs = len(df)
+    merged_prs = len(df[df['state'] == 'merged'])
+    merge_rate = (merged_prs / total_prs * 100) if total_prs > 0 else 0
+
+    # Header panel
+    header_text = f"""[bold blue]PR Metrics Dashboard[/bold blue]
+Generated: [dim]{datetime.now().strftime('%Y-%m-%d %H:%M')}[/dim]
+
+[green]Data Scope:[/green]
+• Date Range: {date_range_start} to {date_range_end}
+• Repositories: {unique_repos} active repos analyzed
+• Contributors: {unique_authors} developers
+• Total PRs: {total_prs}"""
+
+    console.print(Panel(header_text, title="📊 Overview", border_style="blue"))
+
+    # Key metrics summary
+    merged_df = df[df['state'] == 'merged']
+    avg_merge_time = merged_df['time_to_merge_hours'].mean() if not merged_df.empty else 0
+    days_span = (df['created_at'].max() - df['created_at'].min()).days + 1
+    daily_throughput = total_prs / days_span
+
+    summary_table = Table(show_header=False, box=box.SIMPLE)
+    summary_table.add_column("Metric", style="cyan", width=20)
+    summary_table.add_column("Value", style="bold green", width=15)
+    summary_table.add_column("Detail", style="dim")
+
+    summary_table.add_row("Merged PRs", f"{merged_prs}", f"{merge_rate:.1f}% success rate")
+    summary_table.add_row("Avg PR Size", f"{df['pr_size'].mean():.0f} lines", "additions + deletions")
+    summary_table.add_row("Avg Merge Time", f"{avg_merge_time:.1f} hours", "from creation to merge")
+    summary_table.add_row("Daily Throughput", f"{daily_throughput:.1f} PRs/day", "across all repos")
+
+    console.print(Panel(summary_table, title="🎯 Key Metrics", border_style="green"))
+
+    # Top contributors table
+    author_stats = df.groupby('author').agg({
+        'pr_number': 'count',
+        'state': lambda x: (x == 'merged').sum(),
+        'pr_size': 'mean',
+        'time_to_merge_hours': 'mean',
+        'reviews': 'mean'
+    }).round(1)
+
+    author_stats['merge_rate'] = (author_stats['state'] / author_stats['pr_number'] * 100).round(1)
+    author_stats = author_stats.sort_values('pr_number', ascending=False)
+
+    authors_table = Table(box=box.ROUNDED)
+    authors_table.add_column("Author", style="bold")
+    authors_table.add_column("PRs", style="cyan", justify="center")
+    authors_table.add_column("Merged", style="green", justify="center")
+    authors_table.add_column("Avg Size", style="yellow", justify="right")
+    authors_table.add_column("Merge Time", style="magenta", justify="right")
+    authors_table.add_column("Success Rate", style="blue", width=25)
+
+    for author, row in author_stats.iterrows():
+        success_rate = row['merge_rate']
+        success_color = "green" if success_rate >= 90 else "yellow" if success_rate >= 70 else "red"
+
+        # Create visual bar for success rate
+        bar_length = int(15 * success_rate / 100)
+        success_bar = "█" * bar_length + "░" * (15 - bar_length)
+
+        authors_table.add_row(
+            author,
+            str(int(row['pr_number'])),
+            str(int(row['state'])),
+            f"{row['pr_size']:.0f}",
+            f"{row['time_to_merge_hours']:.1f}h" if pd.notna(row['time_to_merge_hours']) else "—",
+            f"[{success_color}]{success_bar} {success_rate:.1f}%[/{success_color}]"
+        )
+
+    console.print(Panel(authors_table, title="👥 Top Contributors", border_style="cyan"))
+
+    # Repository analytics
+    repo_stats = df.groupby('repo').agg({
+        'pr_number': 'count',
+        'state': lambda x: (x == 'merged').sum(),
+        'author': 'nunique',
+        'pr_size': 'mean',
+        'time_to_merge_hours': 'mean'
+    }).round(1)
+
+    repo_stats['merge_rate'] = (repo_stats['state'] / repo_stats['pr_number'] * 100).round(1)
+    repo_stats = repo_stats.sort_values('pr_number', ascending=False)
+
+    repo_table = Table(box=box.ROUNDED)
+    repo_table.add_column("Repository", style="bold")
+    repo_table.add_column("PRs", style="cyan", justify="center")
+    repo_table.add_column("Contributors", style="blue", justify="center")
+    repo_table.add_column("Avg Size", style="yellow", justify="right")
+    repo_table.add_column("Merge Time", style="magenta", justify="right")
+    repo_table.add_column("Success %", style="green", justify="right")
+
+    for repo, row in repo_stats.iterrows():
+        success_rate = row['merge_rate']
+        success_color = "green" if success_rate >= 90 else "yellow" if success_rate >= 70 else "red"
+
+        repo_table.add_row(
+            repo,
+            str(int(row['pr_number'])),
+            str(int(row['author'])),
+            f"{row['pr_size']:.0f}",
+            f"{row['time_to_merge_hours']:.1f}h" if pd.notna(row['time_to_merge_hours']) else "—",
+            f"[{success_color}]{success_rate:.1f}%[/{success_color}]"
+        )
+
+    console.print(Panel(repo_table, title="📁 Repository Analytics", border_style="magenta"))
+
+    # PR Size distribution with visual bars
+    df['size_category'] = pd.cut(df['pr_size'], bins=[0, 50, 200, float('inf')],
+                                labels=['Small (<50)', 'Medium (50-200)', 'Large (>200)'])
+    size_stats = df.groupby('size_category', observed=True).agg({
+        'pr_number': 'count',
+        'time_to_merge_hours': 'mean'
+    }).round(1)
+
+    size_table = Table(box=box.ROUNDED)
+    size_table.add_column("Size Category", style="bold")
+    size_table.add_column("Count", style="cyan", justify="center")
+    size_table.add_column("Distribution", style="blue", width=30)
+    size_table.add_column("Avg Merge Time", style="magenta", justify="right")
+
+    max_count = size_stats['pr_number'].max()
+    for category, row in size_stats.iterrows():
+        count = int(row['pr_number'])
+        percentage = count / total_prs * 100
+        bar_length = int(20 * count / max_count)
+        bar = "█" * bar_length + "░" * (20 - bar_length)
+
+        merge_time = f"{row['time_to_merge_hours']:.1f}h" if pd.notna(row['time_to_merge_hours']) else "—"
+
+        size_table.add_row(
+            str(category),
+            str(count),
+            f"{bar} {percentage:.1f}%",
+            merge_time
+        )
+
+    console.print(Panel(size_table, title="📏 PR Size Distribution", border_style="yellow"))
+
+    # Time-based trends (if enough data)
+    days_span = (df['created_at'].max() - df['created_at'].min()).days + 1
+    if days_span >= 7:
+        df['week'] = df['created_at'].dt.to_period('W').dt.start_time
+        weekly_stats = df.groupby('week').agg({
+            'pr_number': 'count',
+            'state': lambda x: (x == 'merged').sum(),
+            'author': 'nunique'
+        }).tail(6)  # Show last 6 weeks
+
+        trends_table = Table(box=box.ROUNDED)
+        trends_table.add_column("Week", style="bold")
+        trends_table.add_column("PRs Created", style="cyan", justify="center")
+        trends_table.add_column("PRs Merged", style="green", justify="center")
+        trends_table.add_column("Active Authors", style="blue", justify="center")
+        trends_table.add_column("Activity", style="yellow", width=20)
+
+        max_prs = weekly_stats['pr_number'].max()
+        for week, row in weekly_stats.iterrows():
+            prs_created = int(row['pr_number'])
+            prs_merged = int(row['state'])
+            active_authors = int(row['author'])
+
+            activity_bar_length = int(15 * prs_created / max_prs)
+            activity_bar = "█" * activity_bar_length + "░" * (15 - activity_bar_length)
+
+            trends_table.add_row(
+                week.strftime('%Y-%m-%d'),
+                str(prs_created),
+                str(prs_merged),
+                str(active_authors),
+                activity_bar
+            )
+
+        console.print(Panel(trends_table, title="📈 Weekly Trends", border_style="blue"))
+
+    # Footer with tips
+    tips_text = """[dim]💡 Tips:[/dim]
+• High merge rates indicate healthy review processes
+• Large PRs typically take longer to merge and review
+• Consistent weekly activity shows steady development pace"""
+
+    console.print(Panel(tips_text, title="📋 Insights", border_style="dim"))
 
 def generate_markdown_report(df):
     """Generate comprehensive markdown report with detailed analytics"""
@@ -237,10 +451,14 @@ def main():
     parser.add_argument('--min-prs', type=int, default=3, help='Minimum PRs required to include repo in report (default: 3)')
     parser.add_argument('--full-scan', action='store_true', help='Process all repos instead of just active ones (slower, may hit rate limits)')
     parser.add_argument('--report', action='store_true', help='Generate report from existing data')
+    parser.add_argument('--terminal', action='store_true', help='Generate terminal-friendly report with rich styling')
     args = parser.parse_args()
 
     if args.report:
-        generate_markdown_report(load_latest_data())
+        if args.terminal:
+            generate_rich_terminal_report(load_latest_data())
+        else:
+            generate_markdown_report(load_latest_data())
         return
 
     print(f"🔍 Collecting PR metrics for {ORG} (last {args.days} days)")

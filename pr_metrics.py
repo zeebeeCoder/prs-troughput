@@ -150,8 +150,14 @@ def load_latest_data(org=None):
 
     return pd.read_parquet(files[-1]) if files else None
 
-def generate_rich_terminal_report(df, org=None):
-    """Generate rich terminal-styled report with enhanced UX"""
+def generate_rich_terminal_report(df, org=None, top_n_individual=5):
+    """Generate rich terminal-styled report with enhanced UX
+
+    Args:
+        df: DataFrame with PR data
+        org: Organization name
+        top_n_individual: Number of top contributors to show individual weekly breakdowns for
+    """
     if df is None or df.empty:
         console = Console()
         console.print("[red]No data available for reporting[/red]")
@@ -314,38 +320,181 @@ Generated: [dim]{datetime.now().strftime('%Y-%m-%d %H:%M')}[/dim]
     # Time-based trends (if enough data)
     days_span = (df['created_at'].max() - df['created_at'].min()).days + 1
     if days_span >= 7:
-        df['week'] = df['created_at'].dt.to_period('W').dt.start_time
+        df['week'] = df['created_at'].dt.tz_localize(None).dt.to_period('W').dt.start_time
+
+        # Get weekly statistics with enhanced metrics
         weekly_stats = df.groupby('week').agg({
             'pr_number': 'count',
             'state': lambda x: (x == 'merged').sum(),
-            'author': 'nunique'
-        }).tail(6)  # Show last 6 weeks
+            'author': 'nunique',
+            'pr_size': 'mean',
+            'time_to_merge_hours': 'mean'
+        }).round(1)
+
+        # Calculate merge rate and PRs per contributor
+        weekly_stats['merge_rate'] = (weekly_stats['state'] / weekly_stats['pr_number'] * 100).round(1)
+        weekly_stats['prs_per_dev'] = (weekly_stats['pr_number'] / weekly_stats['author']).round(1)
+
+        # Show last 6 weeks
+        weekly_stats = weekly_stats.tail(6)
 
         trends_table = Table(box=box.ROUNDED)
         trends_table.add_column("Week", style="bold")
-        trends_table.add_column("PRs Created", style="cyan", justify="center")
-        trends_table.add_column("PRs Merged", style="green", justify="center")
-        trends_table.add_column("Active Authors", style="blue", justify="center")
-        trends_table.add_column("Activity", style="yellow", width=20)
+        trends_table.add_column("Created", style="cyan", justify="center")
+        trends_table.add_column("Merged", style="green", justify="center")
+        trends_table.add_column("Rate", style="blue", justify="center")
+        trends_table.add_column("Avg Time", style="magenta", justify="right")
+        trends_table.add_column("Contributors", style="yellow", justify="center")
+        trends_table.add_column("PRs/Dev", style="white", justify="center")
+        trends_table.add_column("Avg Size", style="cyan", justify="right")
+        trends_table.add_column("Trend", style="bold", justify="center")
 
-        max_prs = weekly_stats['pr_number'].max()
+        # Track previous week's data for trend comparison
+        prev_created = None
+        prev_merge_rate = None
+
         for week, row in weekly_stats.iterrows():
             prs_created = int(row['pr_number'])
             prs_merged = int(row['state'])
+            merge_rate = row['merge_rate']
             active_authors = int(row['author'])
+            prs_per_dev = row['prs_per_dev']
+            avg_size = row['pr_size']
+            avg_time = row['time_to_merge_hours']
 
-            activity_bar_length = int(15 * prs_created / max_prs)
-            activity_bar = "█" * activity_bar_length + "░" * (15 - activity_bar_length)
+            # Determine trend indicators
+            trend_icon = ""
+            if prev_created is not None:
+                created_change = prs_created - prev_created
+                rate_change = merge_rate - prev_merge_rate
+
+                # Overall trend based on volume and quality
+                if created_change > 0 and rate_change >= 0:
+                    trend_icon = "[green]↑[/green]"  # More PRs, same or better rate
+                elif created_change < 0 and rate_change < -5:
+                    trend_icon = "[red]↓[/red]"  # Fewer PRs and worse rate
+                elif abs(created_change) <= 2 and abs(rate_change) <= 5:
+                    trend_icon = "[yellow]→[/yellow]"  # Stable
+                elif created_change > 0 and rate_change < -5:
+                    trend_icon = "[yellow]↗[/yellow]"  # More PRs but lower quality
+                elif created_change < 0 and rate_change > 5:
+                    trend_icon = "[blue]↘[/blue]"  # Fewer PRs but better quality
+                else:
+                    trend_icon = "[dim]•[/dim]"
+
+            # Color-code merge rate
+            rate_color = "green" if merge_rate >= 90 else "yellow" if merge_rate >= 75 else "red"
+
+            # Color-code merge time
+            time_color = "green" if avg_time < 24 else "yellow" if avg_time < 72 else "red"
+            time_display = f"[{time_color}]{avg_time:.1f}h[/{time_color}]" if pd.notna(avg_time) else "—"
 
             trends_table.add_row(
                 week.strftime('%Y-%m-%d'),
                 str(prs_created),
                 str(prs_merged),
+                f"[{rate_color}]{merge_rate:.1f}%[/{rate_color}]",
+                time_display,
                 str(active_authors),
-                activity_bar
+                f"{prs_per_dev:.1f}",
+                f"{avg_size:.0f}",
+                trend_icon
             )
 
-        console.print(Panel(trends_table, title="📈 Weekly Trends", border_style="blue"))
+            # Store for next iteration
+            prev_created = prs_created
+            prev_merge_rate = merge_rate
+
+        console.print(Panel(trends_table, title="📈 Weekly Performance", border_style="blue"))
+
+    # Individual contributor weekly performance
+    if days_span >= 7:
+        top_authors = df['author'].value_counts().head(top_n_individual).index.tolist()
+
+        console.print()  # Add spacing
+
+        for author in top_authors:
+            author_df = df[df['author'] == author].copy()
+            author_df['week'] = author_df['created_at'].dt.tz_localize(None).dt.to_period('W').dt.start_time
+
+            author_weekly = author_df.groupby('week').agg({
+                'pr_number': 'count',
+                'state': lambda x: (x == 'merged').sum(),
+                'pr_size': 'mean',
+                'time_to_merge_hours': 'mean'
+            }).round(1)
+
+            # Skip if less than 2 weeks of data
+            if len(author_weekly) < 2:
+                continue
+
+            author_weekly['merge_rate'] = (author_weekly['state'] / author_weekly['pr_number'] * 100).round(1)
+            author_weekly = author_weekly.tail(6)  # Last 6 weeks
+
+            # Create individual table
+            author_table = Table(box=box.SIMPLE, show_header=True, header_style="bold cyan")
+            author_table.add_column("Week", style="dim")
+            author_table.add_column("Created", justify="center")
+            author_table.add_column("Merged", justify="center")
+            author_table.add_column("Rate", justify="center")
+            author_table.add_column("Avg Size", justify="right")
+            author_table.add_column("Avg Time", justify="right")
+            author_table.add_column("Trend", justify="center")
+
+            prev_created = None
+            prev_rate = None
+
+            for week, row in author_weekly.iterrows():
+                prs_created = int(row['pr_number'])
+                prs_merged = int(row['state'])
+                merge_rate = row['merge_rate']
+                avg_size = row['pr_size']
+                avg_time = row['time_to_merge_hours']
+
+                # Trend calculation
+                trend_icon = ""
+                if prev_created is not None:
+                    created_change = prs_created - prev_created
+                    rate_change = merge_rate - prev_rate
+
+                    if created_change > 0 and rate_change >= 0:
+                        trend_icon = "[green]↑[/green]"
+                    elif created_change < 0 and rate_change < -5:
+                        trend_icon = "[red]↓[/red]"
+                    elif abs(created_change) <= 1 and abs(rate_change) <= 5:
+                        trend_icon = "[yellow]→[/yellow]"
+                    elif created_change > 0 and rate_change < -5:
+                        trend_icon = "[yellow]↗[/yellow]"
+                    elif created_change < 0 and rate_change > 5:
+                        trend_icon = "[blue]↘[/blue]"
+                    else:
+                        trend_icon = "[dim]•[/dim]"
+
+                # Color coding
+                rate_color = "green" if merge_rate >= 90 else "yellow" if merge_rate >= 75 else "red"
+                time_color = "green" if avg_time < 24 else "yellow" if avg_time < 72 else "red"
+                time_display = f"[{time_color}]{avg_time:.1f}h[/{time_color}]" if pd.notna(avg_time) else "—"
+
+                author_table.add_row(
+                    week.strftime('%Y-%m-%d'),
+                    str(prs_created),
+                    str(prs_merged),
+                    f"[{rate_color}]{merge_rate:.1f}%[/{rate_color}]",
+                    f"{avg_size:.0f}",
+                    time_display,
+                    trend_icon
+                )
+
+                prev_created = prs_created
+                prev_rate = merge_rate
+
+            # Calculate summary stats
+            total_prs = author_df['pr_number'].count()
+            total_merged = len(author_df[author_df['state'] == 'merged'])
+            overall_rate = (total_merged / total_prs * 100) if total_prs > 0 else 0
+
+            title = f"👤 {author} ({total_prs} PRs, {overall_rate:.1f}% merged)"
+            console.print(Panel(author_table, title=title, border_style="cyan", padding=(0, 1)))
 
     # Footer with tips
     tips_text = """[dim]💡 Tips:[/dim]
@@ -490,16 +639,25 @@ def main():
     parser.add_argument('--report', action='store_true', help='Generate report from existing data')
     parser.add_argument('--terminal', action='store_true', help='Generate terminal-friendly report with rich styling')
     parser.add_argument('--org', type=str, help='GitHub organization to analyze (overrides default)')
+    parser.add_argument('--top-n', type=int, default=5, help='Number of top contributors to show individual weekly breakdowns (default: 5)')
     args = parser.parse_args()
 
     # Resolve organization from CLI args, env var, or default
     org = resolve_org(args.org)
 
     if args.report:
+        df = load_latest_data(org)
+
+        # Filter data by time window if --days is specified
+        if df is not None and not df.empty and args.days:
+            cutoff_date = pd.Timestamp.now(tz='UTC') - timedelta(days=args.days)
+            df = df[df['created_at'] >= cutoff_date]
+            print(f"🔍 Filtering report data to last {args.days} days")
+
         if args.terminal:
-            generate_rich_terminal_report(load_latest_data(org), org)
+            generate_rich_terminal_report(df, org, top_n_individual=args.top_n)
         else:
-            generate_markdown_report(load_latest_data(org), org)
+            generate_markdown_report(df, org)
         return
 
     print(f"🔍 Collecting PR metrics for {org} (last {args.days} days)")

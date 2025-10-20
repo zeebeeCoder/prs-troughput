@@ -1,157 +1,166 @@
-# PR Throughput Metrics Tool
+# PR Metrics
 
-A comprehensive CLI tool for collecting Pull Request throughput metrics from GitHub organizations using the `gh` CLI. Specifically designed for tracking development velocity and team performance.
+A modern CLI tool for collecting and analyzing Pull Request metrics from GitHub organizations.
+
+## Features
+
+- 📊 Comprehensive PR analytics (volume, time, size, team metrics)
+- 🎨 Rich terminal reports with color-coded insights
+- 📈 Weekly trend analysis and contributor breakdowns
+- 💾 Export data to Parquet and CSV formats
+- ⚡ Fast and efficient using GitHub CLI (`gh`)
 
 ## Prerequisites
 
-- **GitHub CLI (`gh`)** installed and authenticated
-- **Python 3.7+**
-- Access to the target GitHub organization
+- **Python 3.9+**
+- **[uv](https://docs.astral.sh/uv/)** - Fast Python package manager
+- **[GitHub CLI (gh)](https://cli.github.com/)** - Authenticated with your GitHub account
+
+```bash
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Authenticate with GitHub
+gh auth login
+```
 
 ## Quick Start
 
-1. **Clone/download** the script
-2. **Authenticate with GitHub CLI:**
-   ```bash
-   gh auth login
-   ```
-3. **Run the tool:**
-   ```bash
-   python3 pr_metrics.py
-   ```
+```bash
+# Clone the repository
+cd prs-troughput
+
+# Run with uv (no installation needed!)
+uv run pr-metrics --org your-org --days 30
+```
+
+That's it! `uv` automatically handles all dependencies.
 
 ## Usage
 
 ### Basic Commands
 
 ```bash
-# Default: Analyze last 14 days, default organization
-python3 pr_metrics.py
+# Analyze default organization (last 14 days)
+uv run pr-metrics
 
-# Analyze different organization
-python3 pr_metrics.py --org "microsoft"
+# Analyze specific organization
+uv run pr-metrics --org microsoft
 
-# Analyze last 7 days for specific org
-python3 pr_metrics.py --org "google" --days 7
+# Analyze last 30 days
+uv run pr-metrics --days 30
 
-# Test with minimum repo filter
-python3 pr_metrics.py --min-prs 5
+# Generate terminal report from existing data
+uv run pr-metrics --report --terminal
 
-# Weekly sprint analysis
-python3 pr_metrics.py --org "your-org" --days 7 --min-prs 1
+# Full repository scan (slower, more complete)
+uv run pr-metrics --full-scan --days 30
 ```
 
 ### Command Line Options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--days` | 14 | Number of days back to analyze |
-| `--min-prs` | 3 | Minimum PRs required to include repo in report |
-| `--org` | Eve-World-Platform | GitHub organization to analyze |
-| `--full-scan` | False | Process all repos instead of just active ones |
+| `--org ORG` | Eve-World-Platform | GitHub organization to analyze |
+| `--days DAYS` | 14 | Number of days back to analyze |
+| `--min-prs N` | 3 | Minimum PRs required to include repo |
+| `--full-scan` | False | Process all repos (slower) |
 | `--report` | False | Generate report from existing data |
-| `--terminal` | False | Generate terminal-friendly report with rich styling |
+| `--terminal` | False | Rich terminal report with styling |
+| `--top-n N` | 5 | Top contributors in weekly breakdown |
+
+### Configuration
+
+Set default organization via environment variable:
+
+```bash
+export PR_METRICS_ORG="my-org"
+uv run pr-metrics  # Uses my-org
+uv run pr-metrics --org another-org  # Override to another-org
+```
 
 ## Metrics Collected
 
-### 📊 **Volume Metrics**
-- Total PRs created
-- Merged/closed/open/draft counts
+### 📊 Volume Metrics
+- Total PRs created/merged/closed
 - Daily throughput rate
 - Merge success rate
 
-### ⏱️ **Time Metrics**
+### ⏱️ Time Metrics
 - Average time to merge
-- Average time to first review
-- Review cycle duration
+- Time to first review
+- Weekly trend analysis
 
-### 📏 **Size & Complexity**
-- PR size distribution (small/medium/large/xl)
-- Average lines changed per PR
-- Average commits per PR
-- Review cycles needed
+### 📏 Size & Complexity
+- PR size distribution (small/medium/large)
+- Average lines changed
+- Commits per PR
 
-### 👥 **Team Metrics**
+### 👥 Team Metrics
 - Contributions per author
-- Review decisions (approved/changes requested)
-- Label usage patterns
+- Individual weekly performance
+- Repository activity
 
 ## Output
 
-### Terminal Display
-Real-time progress with summary metrics for each repository and organization totals.
-
-### JSON Reports
-Timestamped data files saved to `output/` directory:
-```
-output/pr_data_your-org-name_20250925_081334.parquet
-output/pr_data_your-org-name_20250925_081334.csv
-```
-
-#### Report Structure
-```json
-{
-  "metadata": {
-    "org": "your-organization-name",
-    "generated_at": "2025-09-25T08:13:25",
-    "days_analyzed": 14,
-    "total_repos_in_org": 100
-  },
-  "repositories": {
-    "repo-name": {
-      "total_prs": 30,
-      "merged_prs": 24,
-      "merge_rate_percent": 80.0,
-      "avg_time_to_merge_hours": 3.09,
-      "avg_pr_size": 634.4,
-      "authors": {...}
-    }
-  },
-  "org_summary": {
-    "total_prs": 64,
-    "daily_throughput": 3.57,
-    "top_contributors": {...}
-  }
-}
-```
-
-## Organization Configuration
-
-### Multiple Ways to Set Organization
-
-1. **Command Line Flag** (highest priority):
-```bash
-python3 pr_metrics.py --org "your-org-name"
-```
-
-2. **Environment Variable**:
-```bash
-export PR_METRICS_ORG="your-org-name"
-python3 pr_metrics.py
-```
-
-3. **Default Fallback**: Eve-World-Platform (if no override specified)
-
-### Advanced Usage
+### Terminal Report
 
 ```bash
-# Generate reports from existing data for specific org
-python3 pr_metrics.py --report --org "microsoft" --terminal
-
-# Compare different time periods for same org
-python3 pr_metrics.py --org "google" --days 30
-python3 pr_metrics.py --org "google" --days 7
-
-# Environment variable with override
-export PR_METRICS_ORG="default-org"
-python3 pr_metrics.py                    # Uses default-org
-python3 pr_metrics.py --org "temp-org"   # Uses temp-org
+uv run pr-metrics --report --terminal
 ```
+
+Shows interactive dashboard with:
+- Color-coded success rates
+- Visual progress bars
+- Weekly performance trends
+- Top contributor breakdowns
+
+### Data Files
+
+Data is saved to `output/` directory:
+```
+output/pr_data_org-name_20251020_143021.parquet
+output/pr_data_org-name_20251020_143021.csv
+```
+
+## Installation Options
+
+### 1. Use with `uv run` (Recommended)
+
+No installation needed - just run:
+```bash
+uv run pr-metrics --org my-org
+```
+
+### 2. Install as Global Tool
+
+```bash
+uv tool install .
+pr-metrics --org my-org  # Now available globally
+```
+
+### 3. Editable Install (Development)
+
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install -e .
+```
+
+See [INSTALL.md](INSTALL.md) for detailed installation instructions.
+
+## Use Cases
+
+- **Sprint retrospectives** - Weekly team velocity
+- **Performance tracking** - Monthly throughput trends
+- **Process optimization** - Identify bottlenecks
+- **Team insights** - Contributor patterns
+- **Historical analysis** - Compare metrics over time
 
 ## Example Output
 
 ```
-🔍 Collecting PR metrics for microsoft (last 14 days)...
+🔍 Collecting PR metrics for microsoft (last 14 days)
 🎯 Found 15 repositories with recent PR activity
 
   1/15: typescript
@@ -167,33 +176,27 @@ python3 pr_metrics.py --org "temp-org"   # Uses temp-org
    Top authors: {'user1': 23, 'user2': 18, 'user3': 15}
 
 💾 Data saved:
-   output/pr_data_microsoft_20250926_143021.parquet
-   output/pr_data_microsoft_20250926_143021.csv
+   output/pr_data_microsoft_20251020_143021.parquet
+   output/pr_data_microsoft_20251020_143021.csv
 ```
-
-### Rich Terminal Reports
-
-```bash
-# Generate enhanced terminal report
-python3 pr_metrics.py --report --org "microsoft" --terminal
-```
-
-Displays interactive dashboard with:
-- Organization-specific metrics
-- Visual progress bars
-- Color-coded success rates
-- Weekly trend analysis
-
-## Use Cases
-
-- **Sprint retrospectives** - Weekly team velocity analysis
-- **Performance tracking** - Monthly throughput trends
-- **Process optimization** - Identify review bottlenecks
-- **Team insights** - Contributor activity and patterns
-- **Historical analysis** - Compare metrics over time using saved JSON reports
 
 ## Troubleshooting
 
-- **Authentication errors**: Run `gh auth status` to verify login
-- **API rate limits**: Use `--limit` to process fewer repositories
-- **No data**: Check organization access and repository permissions
+**Authentication errors**
+```bash
+gh auth status
+gh auth login  # If not authenticated
+```
+
+**No data found**
+- Check organization access
+- Verify repository permissions
+- Try `--full-scan` for complete repo list
+
+**Rate limits**
+- Use `--min-prs` to filter repos
+- Reduce `--days` for shorter time window
+
+## License
+
+MIT

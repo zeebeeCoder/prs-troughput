@@ -31,18 +31,24 @@ def main():
     org = resolve_org(args.org)
 
     if args.report:
-        df = load_latest_data(org, OUTPUT_DIR)
+        # Load with days filter applied during query (more efficient)
+        con, view_name = load_latest_data(org, OUTPUT_DIR, days_back=args.days)
 
-        # Filter data by time window if --days is specified
-        if df is not None and not df.empty and args.days:
-            cutoff_date = pd.Timestamp.now(tz='UTC') - timedelta(days=args.days)
-            df = df[df['created_at'] >= cutoff_date]
-            print(f"🔍 Filtering report data to last {args.days} days")
+        if con is not None:
+            # Get count for user feedback
+            count = con.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0]
+            print(f"🔍 Loaded {count} PRs from last {args.days} days")
 
-        if args.terminal:
-            generate_rich_terminal_report(df, org, top_n_individual=args.top_n)
+            try:
+                if args.terminal:
+                    generate_rich_terminal_report(con, view_name, org, top_n_individual=args.top_n)
+                else:
+                    generate_markdown_report(con, view_name, org)
+            finally:
+                # Clean up DuckDB connection
+                con.close()
         else:
-            generate_markdown_report(df, org)
+            print("No data available for reporting")
         return
 
     print(f"🔍 Collecting PR metrics for {org} (last {args.days} days)")
@@ -62,12 +68,15 @@ def main():
         if prs:
             all_prs_data[repo_name] = prs
 
-    # Convert to DataFrame
-    df = process_prs_to_dataframe(all_prs_data, org)
+    # Convert to structured data (list of dicts)
+    pr_rows = process_prs_to_dataframe(all_prs_data, org)
 
-    if df.empty:
+    if not pr_rows:
         print("No PR data found")
         return
+
+    # Create DataFrame for analysis (temporary)
+    df = pd.DataFrame(pr_rows)
 
     # Filter repos by minimum PR count
     repo_counts = df['repo'].value_counts()
@@ -99,21 +108,25 @@ def main():
 
     print(f"   Top authors: {dict(df['author'].value_counts().head(5))}")
 
-    # Save data
+    # Save data to Hive partitions
+    from .storage import write_to_hive
+    from .utils import sanitize_org_name
+
     Path(OUTPUT_DIR).mkdir(exist_ok=True)
+    Path(f"{OUTPUT_DIR}/data").mkdir(exist_ok=True)
+
+    # Write to Hive-partitioned structure
+    sanitized_org = sanitize_org_name(org)
+    write_to_hive(pr_rows, sanitized_org, base_dir=f"{OUTPUT_DIR}/data")
+
+    # Also save a legacy CSV backup for compatibility
     from datetime import datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    sanitized_org = sanitize_org_name(org)
-
-    parquet_file = f"{OUTPUT_DIR}/pr_data_{sanitized_org}_{timestamp}.parquet"
     csv_file = f"{OUTPUT_DIR}/pr_data_{sanitized_org}_{timestamp}.csv"
-
-    df.to_parquet(parquet_file, index=False)
     df.to_csv(csv_file, index=False)
 
-    print(f"\n💾 Data saved:")
-    print(f"   {parquet_file}")
-    print(f"   {csv_file}")
+    print(f"\n💾 Data saved to Hive partitions: {OUTPUT_DIR}/data/")
+    print(f"   Legacy CSV backup: {csv_file}")
 
 
 if __name__ == "__main__":

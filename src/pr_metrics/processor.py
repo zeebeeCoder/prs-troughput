@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Data processing and DataFrame operations."""
+"""Data processing with DuckDB backend."""
 
 import pandas as pd
 from pathlib import Path
+from .storage import write_to_hive, load_data
 
 
 def process_prs_to_dataframe(all_prs_data, org):
-    """Transform all PR data into a single pandas DataFrame"""
+    """Transform all PR data into structured list for DuckDB
+
+    Returns list of dictionaries with partition columns added.
+    """
     rows = []
 
     for repo_name, prs in all_prs_data.items():
@@ -27,9 +31,15 @@ def process_prs_to_dataframe(all_prs_data, org):
             state = 'merged' if merged_at else ('closed' if closed_at else 'open')
             labels = ','.join([l.get('name', '') for l in pr.get('labels', [])])
 
+            # Add partition columns for Hive partitioning
+            year = created_at.year if created_at else None
+            month = created_at.month if created_at else None
+
             rows.append({
                 'org': org,
                 'repo': repo_name,
+                'year': year,
+                'month': month,
                 'pr_number': pr.get('number'),
                 'author': author,
                 'created_at': created_at,
@@ -44,18 +54,26 @@ def process_prs_to_dataframe(all_prs_data, org):
                 'labels': labels
             })
 
-    return pd.DataFrame(rows)
+    return rows
 
 
-def load_latest_data(org=None, output_dir="output"):
-    """Load most recent parquet file, optionally filtered by org"""
-    from .utils import sanitize_org_name
+def load_latest_data(org=None, output_dir="output", days_back=None):
+    """Load PR data using smart loading strategy
 
-    if org:
-        sanitized_org = sanitize_org_name(org)
-        pattern = f"pr_data_{sanitized_org}_*.parquet"
-        files = sorted(Path(output_dir).glob(pattern))
-    else:
-        files = sorted(Path(output_dir).glob("pr_data_*.parquet"))
+    Tries Hive-partitioned data first, falls back to legacy timestamped files.
 
-    return pd.read_parquet(files[-1]) if files else None
+    Args:
+        org: Organization name to filter (will be used as-is for Hive, sanitized for legacy)
+        output_dir: Base directory (contains both 'data/' for Hive and legacy files)
+        days_back: Filter to PRs from last N days
+
+    Returns:
+        tuple: (DuckDB connection, view_name) or (None, None)
+    """
+    # Try loading with smart loader (Hive first with original org name, then legacy with sanitized)
+    return load_data(
+        org=org,  # Use original org name for Hive partitions
+        base_dir=f"{output_dir}/data",
+        legacy_dir=output_dir,
+        days_back=days_back
+    )

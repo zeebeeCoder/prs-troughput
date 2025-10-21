@@ -6,7 +6,7 @@ import os
 
 def resolve_org(args_org=None):
     """Resolve organization from multiple sources with priority"""
-    # Priority: CLI arg > env var > hardcoded default
+    # Priority: CLI arg > env var
     if args_org:
         return args_org
 
@@ -14,8 +14,12 @@ def resolve_org(args_org=None):
     if env_org:
         return env_org
 
-    # Default fallback
-    return "Eve-World-Platform"
+    # No default - require explicit org specification
+    raise ValueError(
+        "GitHub organization not specified. Please provide it via:\n"
+        "  1. CLI flag: --org 'YourOrg'\n"
+        "  2. Environment variable: export PR_METRICS_ORG='YourOrg'"
+    )
 
 
 def sanitize_org_name(org_name):

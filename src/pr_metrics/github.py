@@ -54,7 +54,10 @@ def get_repo_prs(org, repo_name, days_back=14):
     """Get PRs for a repository from the last N days"""
     since_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
     # Don't use --search as it's unreliable; filter in post-processing instead
-    cmd = f'gh pr list --repo {org}/{repo_name} --state all --json number,author,title,createdAt,mergedAt,closedAt,reviewDecision,additions,deletions,isDraft,labels --limit 200'
+    # Enhanced fields: reviews, reviewRequests, mergedBy, comments, changedFiles
+    # Note: commits field excluded due to GitHub GraphQL complexity limits (authors connection)
+    # We'll calculate commit count from GitHub's commits API if needed later
+    cmd = f'gh pr list --repo {org}/{repo_name} --state all --json number,author,title,createdAt,mergedAt,closedAt,state,additions,deletions,isDraft,labels,reviewDecision,reviews,reviewRequests,mergedBy,comments,changedFiles --limit 100'
     all_prs = run_gh_command(cmd)
 
     # Filter PRs by date in post-processing

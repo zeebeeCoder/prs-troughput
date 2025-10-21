@@ -72,11 +72,12 @@ def write_to_hive(pr_data_list, org, base_dir="output/data"):
         con.close()
 
 
-def load_from_hive(org=None, base_dir="output/data", days_back=None):
+def load_from_hive(org=None, repo=None, base_dir="output/data", days_back=None):
     """Load PR data from Hive partitions using DuckDB
 
     Args:
         org: Filter by organization (None for all orgs)
+        repo: Filter by repository (None for all repos)
         base_dir: Base directory for Hive partitions
         days_back: Filter to only PRs from last N days
 
@@ -90,9 +91,10 @@ def load_from_hive(org=None, base_dir="output/data", days_back=None):
     data_path = f"{base_dir}/**/*.parquet"
 
     # Base query with Hive partitioning enabled
+    # union_by_name=true allows reading files with different schemas (handles schema evolution)
     query = f"""
         CREATE OR REPLACE VIEW pr_data AS
-        SELECT * FROM read_parquet('{data_path}', hive_partitioning=true)
+        SELECT * FROM read_parquet('{data_path}', hive_partitioning=true, union_by_name=true)
     """
 
     # Add WHERE clauses for filtering
@@ -100,6 +102,9 @@ def load_from_hive(org=None, base_dir="output/data", days_back=None):
 
     if org:
         where_clauses.append(f"org = '{org}'")
+
+    if repo:
+        where_clauses.append(f"repo = '{repo}'")
 
     if days_back:
         cutoff_date = datetime.now() - timedelta(days=days_back)
@@ -180,11 +185,12 @@ def load_from_legacy(org=None, output_dir="output"):
     return None, None
 
 
-def load_data(org=None, base_dir="output/data", legacy_dir="output", days_back=None):
+def load_data(org=None, repo=None, base_dir="output/data", legacy_dir="output", days_back=None):
     """Smart loader: tries Hive partitions first, falls back to legacy files
 
     Args:
         org: Organization name to filter
+        repo: Repository name to filter
         base_dir: Base directory for Hive partitions
         legacy_dir: Directory for legacy timestamped files
         days_back: Filter to only PRs from last N days
@@ -194,7 +200,7 @@ def load_data(org=None, base_dir="output/data", legacy_dir="output", days_back=N
         Note: Caller is responsible for closing the connection when done
     """
     # Try Hive-partitioned data first
-    con, view_name = load_from_hive(org, base_dir, days_back)
+    con, view_name = load_from_hive(org, repo, base_dir, days_back)
 
     if con is not None:
         return con, view_name
@@ -204,14 +210,21 @@ def load_data(org=None, base_dir="output/data", legacy_dir="output", days_back=N
     con, view_name = load_from_legacy(org, legacy_dir)
 
     if con is not None:
-        # Apply days_back filter if specified (create filtered view)
+        # Apply filters if specified (create filtered view)
+        filters = []
         if days_back:
             cutoff_date = datetime.now() - timedelta(days=days_back)
             cutoff_str = cutoff_date.strftime('%Y-%m-%d')
+            filters.append(f"created_at >= '{cutoff_str}'")
+        if repo:
+            filters.append(f"repo = '{repo}'")
+
+        if filters:
+            where_clause = " AND ".join(filters)
             con.execute(f"""
                 CREATE OR REPLACE VIEW pr_data_filtered AS
                 SELECT * FROM {view_name}
-                WHERE created_at >= '{cutoff_str}'
+                WHERE {where_clause}
             """)
             return con, "pr_data_filtered"
         return con, view_name

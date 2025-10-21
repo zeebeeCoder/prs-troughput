@@ -8,7 +8,7 @@ import pandas as pd
 
 from .github import get_org_repos, get_active_repos_from_search, get_repo_prs
 from .processor import process_prs_to_dataframe, load_latest_data
-from .reports import generate_rich_terminal_report, generate_markdown_report
+from .reports import generate_rich_terminal_report, generate_markdown_report, generate_contributor_report
 from .utils import resolve_org, sanitize_org_name
 
 
@@ -24,6 +24,7 @@ def main():
     parser.add_argument('--report', action='store_true', help='Generate report from existing data')
     parser.add_argument('--terminal', action='store_true', help='Generate terminal-friendly report with rich styling')
     parser.add_argument('--org', type=str, help='GitHub organization to analyze (overrides default)')
+    parser.add_argument('--repo', type=str, help='Filter by specific repository name (requires --org or default org)')
     parser.add_argument('--top-n', type=int, default=5, help='Number of top contributors to show individual weekly breakdowns (default: 5)')
     args = parser.parse_args()
 
@@ -32,18 +33,22 @@ def main():
 
     if args.report:
         # Load with days filter applied during query (more efficient)
-        con, view_name = load_latest_data(org, OUTPUT_DIR, days_back=args.days)
+        con, view_name = load_latest_data(org, OUTPUT_DIR, days_back=args.days, repo=args.repo)
 
         if con is not None:
             # Get count for user feedback
             count = con.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0]
-            print(f"🔍 Loaded {count} PRs from last {args.days} days")
+            repo_filter_msg = f" from {args.repo}" if args.repo else ""
+            print(f"🔍 Loaded {count} PRs from last {args.days} days{repo_filter_msg}")
 
             try:
-                if args.terminal:
-                    generate_rich_terminal_report(con, view_name, org, top_n_individual=args.top_n)
+                # Route to contributor-focused report when repo is specified
+                if args.repo and args.terminal:
+                    generate_contributor_report(con, view_name, org, repo=args.repo)
+                elif args.terminal:
+                    generate_rich_terminal_report(con, view_name, org, repo=args.repo, top_n_individual=args.top_n)
                 else:
-                    generate_markdown_report(con, view_name, org)
+                    generate_markdown_report(con, view_name, org, repo=args.repo)
             finally:
                 # Clean up DuckDB connection
                 con.close()

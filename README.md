@@ -205,8 +205,6 @@ source .venv/bin/activate
 uv pip install -e .
 ```
 
-See [INSTALL.md](INSTALL.md) for detailed installation instructions.
-
 ## Use Cases
 
 ### For Engineering Managers

@@ -113,11 +113,8 @@ def load_from_hive(org=None, repo=None, base_dir="output/data", days_back=None):
 
     if where_clauses:
         query = query.replace(
-            "FROM read_parquet",
-            f"FROM read_parquet"
-        ).replace(
-            "hive_partitioning=true)",
-            f"hive_partitioning=true) WHERE {' AND '.join(where_clauses)}"
+            "union_by_name=true)",
+            f"union_by_name=true) WHERE {' AND '.join(where_clauses)}"
         )
 
     try:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -50,8 +51,8 @@ def _select_repos(args, org):
     return get_active_repos_from_search(org, args.days)
 
 
-def _collect_prs(args, org, repos):
-    """Collect and persist PR rows, preserving legacy behavior."""
+def _fetch_pr_data(args, org, repos):
+    """Fetch raw PR data for each selected repository."""
     all_prs_data = {}
     for i, repo in enumerate(repos, 1):
         repo_name = repo['name']
@@ -59,63 +60,110 @@ def _collect_prs(args, org, repos):
         prs = get_repo_prs(org, repo_name, args.days)
         if prs:
             all_prs_data[repo_name] = prs
+    return all_prs_data
 
-    pr_rows = process_prs_to_dataframe(all_prs_data, org)
 
-    if not pr_rows:
-        print("No PR data found")
-        return []
+def _filter_active_pr_rows(df, args):
+    """Apply minimum-PR repo filtering unless the user scoped repositories explicitly."""
+    if args.repo:
+        return df
 
-    # Create DataFrame for analysis (temporary)
-    df = pd.DataFrame(pr_rows)
+    repo_counts = df['repo'].value_counts()
+    active_repos = repo_counts[repo_counts >= args.min_prs].index.tolist()
+    if not active_repos:
+        print(f"⚠️  No repos found with at least {args.min_prs} PRs")
+        return pd.DataFrame()
 
-    # Filter repos by minimum PR count unless the user explicitly scoped a repo.
-    if not args.repo:
-        repo_counts = df['repo'].value_counts()
-        active_repos = repo_counts[repo_counts >= args.min_prs].index.tolist()
+    filtered_count = len(repo_counts) - len(active_repos)
+    if filtered_count > 0:
+        print(f"📊 Filtered out {filtered_count} repos with fewer than {args.min_prs} PRs")
+    return df[df['repo'].isin(active_repos)]
 
-        if active_repos:
-            df = df[df['repo'].isin(active_repos)]
-            pr_rows = df.to_dict('records')
-            filtered_count = len(repo_counts) - len(active_repos)
-            if filtered_count > 0:
-                print(f"📊 Filtered out {filtered_count} repos with fewer than {args.min_prs} PRs")
-        else:
-            print(f"⚠️  No repos found with at least {args.min_prs} PRs")
-            return []
 
-    # Calculate and display metrics
+def _print_pr_collection_results(df, days):
+    """Print collection summary metrics."""
     total_prs = len(df)
-    merged_prs = len(df[df['state'] == 'merged'])
+    merged_df = df[df['state'] == 'merged']
+    merged_prs = len(merged_df)
     merge_rate = (merged_prs / total_prs * 100) if total_prs > 0 else 0
 
     print("\n🎯 PR RESULTS:")
     print(f"   Total PRs: {total_prs}")
     print(f"   Merged: {merged_prs} ({merge_rate:.1f}%)")
-    print(f"   Daily throughput: {merged_prs / args.days:.1f} PRs/day")
+    print(f"   Daily throughput: {merged_prs / days:.1f} PRs/day")
     print(f"   Avg PR size: {df['pr_size'].mean():.0f} lines")
-
-    merged_df = df[df['state'] == 'merged']
     if not merged_df.empty:
         print(f"   Avg time to merge: {merged_df['time_to_merge_hours'].mean():.1f} hours")
-
     print(f"   Top authors: {dict(df['author'].value_counts().head(5))}")
 
+
+def _persist_pr_rows(df, pr_rows, org):
+    """Persist PR rows to Hive partitions plus legacy CSV backup."""
     Path(OUTPUT_DIR).mkdir(exist_ok=True)
     Path(f"{OUTPUT_DIR}/data").mkdir(exist_ok=True)
 
     sanitized_org = sanitize_org_name(org)
     write_to_hive(pr_rows, sanitized_org, base_dir=f"{OUTPUT_DIR}/data")
 
-    # Also save a legacy CSV backup for compatibility
-    from datetime import datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_file = f"{OUTPUT_DIR}/pr_data_{sanitized_org}_{timestamp}.csv"
     df.to_csv(csv_file, index=False)
 
     print(f"\n💾 PR data saved to Hive partitions: {OUTPUT_DIR}/data/")
     print(f"   Legacy CSV backup: {csv_file}")
+
+
+def _collect_prs(args, org, repos):
+    """Collect and persist PR rows, preserving legacy behavior."""
+    pr_rows = process_prs_to_dataframe(_fetch_pr_data(args, org, repos), org)
+    if not pr_rows:
+        print("No PR data found")
+        return []
+
+    df = _filter_active_pr_rows(pd.DataFrame(pr_rows), args)
+    if df.empty:
+        return []
+
+    pr_rows = df.to_dict('records')
+    _print_pr_collection_results(df, args.days)
+    _persist_pr_rows(df, pr_rows, org)
     return pr_rows
+
+
+def _collect_commit_ledger(args, org, repos):
+    """Collect and persist default-branch commit ledger rows."""
+    all_commits_data = {}
+    for i, repo in enumerate(repos, 1):
+        repo_name = repo['name']
+        print(f"  {i}/{len(repos)} commits: {repo_name}")
+        commits = get_repo_commits(
+            org,
+            repo_name,
+            days_back=args.days,
+            limit=args.commit_limit,
+            include_files=not args.skip_commit_files,
+        )
+        if commits:
+            all_commits_data[repo_name] = commits
+
+    commit_rows, file_rows = process_commits_to_rows(all_commits_data, org)
+    write_rows_to_hive(commit_rows, f"{OUTPUT_DIR}/ledger/commits", table_name="commits")
+    if not args.skip_commit_files:
+        write_rows_to_hive(file_rows, f"{OUTPUT_DIR}/ledger/commit_files", table_name="commit_files")
+
+
+def _collect_branch_ledger(args, org, repos):
+    """Collect and persist remote branch snapshot rows."""
+    all_branch_data = {}
+    for i, repo in enumerate(repos, 1):
+        repo_name = repo['name']
+        print(f"  {i}/{len(repos)} branches: {repo_name}")
+        branches = get_repo_branches(org, repo_name, limit=args.branch_limit)
+        if branches:
+            all_branch_data[repo_name] = branches
+
+    branch_rows = process_branches_to_rows(all_branch_data, org)
+    write_rows_to_hive(branch_rows, f"{OUTPUT_DIR}/ledger/branches", table_name="branches")
 
 
 def _collect_ledger(args, org, repos):
@@ -127,42 +175,15 @@ def _collect_ledger(args, org, repos):
         return
 
     Path(f"{OUTPUT_DIR}/ledger").mkdir(parents=True, exist_ok=True)
-
     if include_commits:
-        all_commits_data = {}
-        for i, repo in enumerate(repos, 1):
-            repo_name = repo['name']
-            print(f"  {i}/{len(repos)} commits: {repo_name}")
-            commits = get_repo_commits(
-                org,
-                repo_name,
-                days_back=args.days,
-                limit=args.commit_limit,
-                include_files=not args.skip_commit_files,
-            )
-            if commits:
-                all_commits_data[repo_name] = commits
-
-        commit_rows, file_rows = process_commits_to_rows(all_commits_data, org)
-        write_rows_to_hive(commit_rows, f"{OUTPUT_DIR}/ledger/commits", table_name="commits")
-        if not args.skip_commit_files:
-            write_rows_to_hive(file_rows, f"{OUTPUT_DIR}/ledger/commit_files", table_name="commit_files")
-
+        _collect_commit_ledger(args, org, repos)
     if include_branches:
-        all_branch_data = {}
-        for i, repo in enumerate(repos, 1):
-            repo_name = repo['name']
-            print(f"  {i}/{len(repos)} branches: {repo_name}")
-            branches = get_repo_branches(org, repo_name, limit=args.branch_limit)
-            if branches:
-                all_branch_data[repo_name] = branches
-
-        branch_rows = process_branches_to_rows(all_branch_data, org)
-        write_rows_to_hive(branch_rows, f"{OUTPUT_DIR}/ledger/branches", table_name="branches")
+        _collect_branch_ledger(args, org, repos)
 
 
-def main():
-    """Main CLI entry point."""
+
+def _build_parser():
+    """Create the CLI argument parser."""
     parser = argparse.ArgumentParser(description='Collect PR metrics and Git delivery ledger data using gh + DuckDB')
     parser.add_argument('--days', type=int, default=14, help='Days back to analyze')
     parser.add_argument('--min-prs', type=int, default=3, help='Minimum PRs required to include repo in report (default: 3)')
@@ -185,85 +206,90 @@ def main():
     parser.add_argument('--format', choices=('table', 'json', 'csv'), default='table', help='Output format for --insight (default: table)')
     parser.add_argument('--validate-local', type=str, help='Read-only local Git repo path to compare against existing parquet data')
     parser.add_argument('--remote', type=str, default='origin', help='Remote name for --validate-local branch checks (default: origin)')
-    args = parser.parse_args()
+    return parser
 
-    if args.list_insights:
-        for name, insight in sorted(INSIGHTS.items()):
-            print(f"{name}\t{insight.description}")
+
+def _handle_list_insights():
+    """Print registered insight slices."""
+    for name, insight in sorted(INSIGHTS.items()):
+        print(f"{name}\t{insight.description}")
+
+
+def _handle_insight(args, org):
+    """Run a named reusable insight slice."""
+    df = run_insight(
+        args.insight,
+        output_dir=OUTPUT_DIR,
+        org=org,
+        repo=args.repo,
+        days_back=args.days,
+    )
+    print(render_dataframe(df, args.format))
+
+
+def _handle_validate_local(args, org):
+    """Compare collected ledger data with a local clone."""
+    if not args.repo or ',' in args.repo:
+        raise ValueError("--validate-local requires exactly one --repo")
+    result = validate_local_repo(
+        args.validate_local,
+        org=org,
+        repo=args.repo,
+        output_dir=OUTPUT_DIR,
+        days_back=args.days,
+        remote=args.remote,
+    )
+    print("\nCommit validation")
+    print(render_dataframe(result.commit_summary, args.format))
+    if not result.commit_mismatches.empty:
+        print("\nCommit mismatches")
+        print(render_dataframe(result.commit_mismatches.head(50), args.format))
+    print("\nBranch validation")
+    print(render_dataframe(result.branch_summary, args.format))
+    if not result.branch_mismatches.empty:
+        print("\nBranch mismatches")
+        print(render_dataframe(result.branch_mismatches.head(50), args.format))
+
+
+def _handle_delivery_report(args, org):
+    """Render the combined delivery report."""
+    generate_delivery_report(
+        org=org,
+        repo=args.repo,
+        days_back=args.days,
+        output_dir=OUTPUT_DIR,
+        branch_active_days=args.branch_active_days,
+    )
+
+
+def _render_pr_report(args, org, con, view_name):
+    """Render the selected PR-only report format."""
+    if args.repo and args.terminal:
+        generate_contributor_report(con, view_name, org, repo=args.repo)
+    elif args.terminal:
+        generate_rich_terminal_report(con, view_name, org, repo=args.repo, top_n_individual=args.top_n)
+    else:
+        generate_markdown_report(con, view_name, org, repo=args.repo)
+
+
+def _handle_pr_report(args, org):
+    """Load existing PR data and render a PR report."""
+    con, view_name = load_latest_data(org, OUTPUT_DIR, days_back=args.days, repo=args.repo)
+    if con is None:
+        print("No data available for reporting")
         return
 
-    # Resolve organization from CLI args, env var, or default
-    org = resolve_org(args.org)
+    try:
+        count = con.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0]
+        repo_filter_msg = f" from {args.repo}" if args.repo else ""
+        print(f"🔍 Loaded {count} PRs from last {args.days} days{repo_filter_msg}")
+        _render_pr_report(args, org, con, view_name)
+    finally:
+        con.close()
 
-    if args.insight:
-        df = run_insight(
-            args.insight,
-            output_dir=OUTPUT_DIR,
-            org=org,
-            repo=args.repo,
-            days_back=args.days,
-        )
-        print(render_dataframe(df, args.format))
-        return
 
-    if args.validate_local:
-        if not args.repo or ',' in args.repo:
-            raise ValueError("--validate-local requires exactly one --repo")
-        result = validate_local_repo(
-            args.validate_local,
-            org=org,
-            repo=args.repo,
-            output_dir=OUTPUT_DIR,
-            days_back=args.days,
-            remote=args.remote,
-        )
-        print("\nCommit validation")
-        print(render_dataframe(result.commit_summary, args.format))
-        if not result.commit_mismatches.empty:
-            print("\nCommit mismatches")
-            print(render_dataframe(result.commit_mismatches.head(50), args.format))
-        print("\nBranch validation")
-        print(render_dataframe(result.branch_summary, args.format))
-        if not result.branch_mismatches.empty:
-            print("\nBranch mismatches")
-            print(render_dataframe(result.branch_mismatches.head(50), args.format))
-        return
-
-    if args.report or args.delivery_report:
-        if args.delivery_report:
-            generate_delivery_report(
-                org=org,
-                repo=args.repo,
-                days_back=args.days,
-                output_dir=OUTPUT_DIR,
-                branch_active_days=args.branch_active_days,
-            )
-            return
-
-        # Load with days filter applied during query (more efficient)
-        con, view_name = load_latest_data(org, OUTPUT_DIR, days_back=args.days, repo=args.repo)
-
-        if con is not None:
-            # Get count for user feedback
-            count = con.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0]
-            repo_filter_msg = f" from {args.repo}" if args.repo else ""
-            print(f"🔍 Loaded {count} PRs from last {args.days} days{repo_filter_msg}")
-
-            try:
-                # Route to contributor-focused report when repo is specified
-                if args.repo and args.terminal:
-                    generate_contributor_report(con, view_name, org, repo=args.repo)
-                elif args.terminal:
-                    generate_rich_terminal_report(con, view_name, org, repo=args.repo, top_n_individual=args.top_n)
-                else:
-                    generate_markdown_report(con, view_name, org, repo=args.repo)
-            finally:
-                # Clean up DuckDB connection
-                con.close()
-        else:
-            print("No data available for reporting")
-        return
-
+def _handle_collection(args, org):
+    """Collect fresh PR and optional ledger data."""
     print(f"🔍 Collecting PR metrics for {org} (last {args.days} days)")
     repos = _select_repos(args, org)
     if not repos:
@@ -272,6 +298,29 @@ def main():
 
     _collect_prs(args, org, repos)
     _collect_ledger(args, org, repos)
+
+
+def main(argv=None):
+    """Main CLI entry point."""
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if args.list_insights:
+        _handle_list_insights()
+        return
+
+    org = resolve_org(args.org)
+
+    if args.insight:
+        _handle_insight(args, org)
+    elif args.validate_local:
+        _handle_validate_local(args, org)
+    elif args.delivery_report:
+        _handle_delivery_report(args, org)
+    elif args.report:
+        _handle_pr_report(args, org)
+    else:
+        _handle_collection(args, org)
 
 
 if __name__ == "__main__":

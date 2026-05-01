@@ -97,57 +97,65 @@ def write_to_hive(pr_data_list, org, base_dir="output/data"):
     write_rows_to_hive(pr_data_list, base_dir=base_dir, table_name="pr_data")
 
 
-def load_from_hive(org=None, repo=None, base_dir="output/data", days_back=None):
-    """Load PR data from Hive partitions using DuckDB
 
-    Args:
-        org: Filter by organization (None for all orgs)
-        repo: Filter by repository (None for all repos)
-        base_dir: Base directory for Hive partitions
-        days_back: Filter to only PRs from last N days
+def _date_cutoff_filter(column, days_back):
+    """Return a SQL cutoff predicate for an optional days-back filter."""
+    if not (days_back and column):
+        return None
+    cutoff_date = datetime.now() - timedelta(days=days_back)
+    return f"{column} >= '{cutoff_date.strftime('%Y-%m-%d')}'"
 
-    Returns:
-        tuple: (DuckDB connection, view_name) or (None, None) if no data
-    """
-    # Create DuckDB connection (in-memory)
-    con = duckdb.connect()
 
-    # Build the query
-    data_path = f"{base_dir}/**/*.parquet"
+def _dataset_filters(org=None, repo=None, days_back=None, date_column=None):
+    """Build common Hive dataset filter predicates."""
+    filters = []
+    if org:
+        filters.append(f"org = '{org}'")
+    if repo:
+        filters.append(f"repo = '{repo}'")
+    date_filter = _date_cutoff_filter(date_column, days_back)
+    if date_filter:
+        filters.append(date_filter)
+    return filters
 
-    # Base query with Hive partitioning enabled
-    # union_by_name=true allows reading files with different schemas (handles schema evolution)
+
+def _hive_view_query(view_name, data_path, filters=None):
+    """Build a DuckDB view query over Hive-partitioned parquet."""
     query = f"""
-        CREATE OR REPLACE VIEW pr_data AS
+        CREATE OR REPLACE VIEW {view_name} AS
         SELECT * FROM read_parquet('{data_path}', hive_partitioning=true, union_by_name=true)
     """
+    if filters:
+        query += f" WHERE {' AND '.join(filters)}"
+    return query
 
-    # Add WHERE clauses for filtering
-    where_clauses = []
 
-    if org:
-        where_clauses.append(f"org = '{org}'")
+def _execute_nonempty_view(con, query, view_name):
+    """Create a view and return its row count, closing empty views."""
+    con.execute(query)
+    return con.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0]
 
-    if repo:
-        where_clauses.append(f"repo = '{repo}'")
 
-    if days_back:
-        cutoff_date = datetime.now() - timedelta(days=days_back)
-        cutoff_str = cutoff_date.strftime('%Y-%m-%d')
-        where_clauses.append(f"created_at >= '{cutoff_str}'")
+def _is_missing_parquet_error(error):
+    """Return whether a DuckDB error means no parquet files were available."""
+    text = str(error)
+    return "No files found" in text or "does not exist" in text
 
-    if where_clauses:
-        query = query.replace(
-            "union_by_name=true)",
-            f"union_by_name=true) WHERE {' AND '.join(where_clauses)}"
-        )
+
+def load_from_hive(org=None, repo=None, base_dir="output/data", days_back=None):
+    """Load PR data from Hive partitions using DuckDB.
+
+    Returns (connection, view_name) or (None, None) if no data exists.
+    """
+    con = duckdb.connect()
+    query = _hive_view_query(
+        "pr_data",
+        f"{base_dir}/**/*.parquet",
+        _dataset_filters(org=org, repo=repo, days_back=days_back, date_column="created_at"),
+    )
 
     try:
-        # Create the view
-        con.execute(query)
-
-        # Verify data exists
-        count = con.execute("SELECT COUNT(*) FROM pr_data").fetchone()[0]
+        count = _execute_nonempty_view(con, query, "pr_data")
         if count == 0:
             print("ℹ️  No data found in Hive partitions matching criteria")
             con.close()
@@ -155,10 +163,8 @@ def load_from_hive(org=None, repo=None, base_dir="output/data", days_back=None):
 
         print(f"✓ Loaded {count} PRs from Hive partitions into DuckDB view")
         return con, "pr_data"
-
     except Exception as e:
-        # Handle case where no Hive data exists yet
-        if "No files found" in str(e) or "does not exist" in str(e):
+        if _is_missing_parquet_error(e):
             print(f"ℹ️  No Hive-partitioned data found in {base_dir}")
             con.close()
             return None, None
@@ -171,34 +177,20 @@ def load_hive_dataset(dataset_dir, view_name, org=None, repo=None, days_back=Non
     Returns (connection, view_name) or (None, None) when no data exists.
     """
     con = duckdb.connect()
-    data_path = f"{dataset_dir}/**/*.parquet"
-    where_clauses = []
-
-    if org:
-        where_clauses.append(f"org = '{org}'")
-    if repo:
-        where_clauses.append(f"repo = '{repo}'")
-    if days_back and date_column:
-        cutoff_date = datetime.now() - timedelta(days=days_back)
-        cutoff_str = cutoff_date.strftime('%Y-%m-%d')
-        where_clauses.append(f"{date_column} >= '{cutoff_str}'")
-
-    query = f"""
-        CREATE OR REPLACE VIEW {view_name} AS
-        SELECT * FROM read_parquet('{data_path}', hive_partitioning=true, union_by_name=true)
-    """
-    if where_clauses:
-        query += f" WHERE {' AND '.join(where_clauses)}"
+    query = _hive_view_query(
+        view_name,
+        f"{dataset_dir}/**/*.parquet",
+        _dataset_filters(org=org, repo=repo, days_back=days_back, date_column=date_column),
+    )
 
     try:
-        con.execute(query)
-        count = con.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0]
+        count = _execute_nonempty_view(con, query, view_name)
         if count == 0:
             con.close()
             return None, None
         return con, view_name
     except Exception as e:
-        if "No files found" in str(e) or "does not exist" in str(e):
+        if _is_missing_parquet_error(e):
             con.close()
             return None, None
         raise

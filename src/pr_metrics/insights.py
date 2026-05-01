@@ -375,6 +375,101 @@ def _create_raw_view(
     return True
 
 
+
+def _create_latest_view(con, source_view: str, latest_view: str, partition_by: str, order_by: str) -> None:
+    """Create a latest-row view over a raw delivery-lake dataset."""
+    con.execute(f"""
+        CREATE OR REPLACE VIEW {latest_view} AS
+        SELECT * EXCLUDE (rn)
+        FROM (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY {partition_by}
+                    ORDER BY {order_by} DESC NULLS LAST
+                ) AS rn
+            FROM {source_view}
+        )
+        WHERE rn = 1
+    """)
+
+
+DELIVERY_DATASETS = (
+    {
+        "raw_view": "prs_raw",
+        "latest_view": "prs_latest",
+        "relative_dir": ("data",),
+        "days_back": "configured",
+        "date_column": "created_at",
+        "partition_by": "org, repo, pr_number",
+        "order_by": "COALESCE(collected_at, updated_at, created_at)",
+    },
+    {
+        "raw_view": "commits_raw",
+        "latest_view": "commits_latest",
+        "relative_dir": ("ledger", "commits"),
+        "days_back": "configured",
+        "date_column": "committed_at",
+        "partition_by": "org, repo, sha",
+        "order_by": "COALESCE(collected_at, committed_at)",
+    },
+    {
+        "raw_view": "branches_raw",
+        "latest_view": "branches_latest",
+        "relative_dir": ("ledger", "branches"),
+        "days_back": None,
+        "date_column": None,
+        "partition_by": "org, repo, branch",
+        "order_by": "COALESCE(collected_at, last_commit_at)",
+    },
+    {
+        "raw_view": "commit_files_raw",
+        "latest_view": "commit_files_latest",
+        "relative_dir": ("ledger", "commit_files"),
+        "days_back": "configured",
+        "date_column": None,
+        "partition_by": "org, repo, sha, path",
+        "order_by": "collected_at",
+    },
+)
+
+
+def _dataset_path(root: Path, config: dict) -> Path:
+    """Return the parquet directory path for a delivery dataset config."""
+    path = root
+    for part in config["relative_dir"]:
+        path /= part
+    return path
+
+
+def _dataset_days_back(config: dict, days_back: int | None) -> int | None:
+    """Resolve per-dataset days-back policy."""
+    return days_back if config["days_back"] == "configured" else config["days_back"]
+
+
+def _create_delivery_dataset_views(con, root: Path, config: dict, org, repo, days_back) -> set[str]:
+    """Create raw/latest views for one delivery-lake dataset when parquet exists."""
+    if not _create_raw_view(
+        con,
+        config["raw_view"],
+        _dataset_path(root, config),
+        org,
+        repo,
+        _dataset_days_back(config, days_back),
+        config["date_column"],
+    ):
+        return set()
+
+    _create_latest_view(
+        con,
+        config["raw_view"],
+        config["latest_view"],
+        config["partition_by"],
+        config["order_by"],
+    )
+    return {config["raw_view"], config["latest_view"]}
+
+
 def create_delivery_lake_views(
     output_dir: str = "output",
     org: str | None = None,
@@ -385,75 +480,8 @@ def create_delivery_lake_views(
     con = duckdb.connect()
     root = Path(output_dir)
     available: set[str] = set()
-
-    if _create_raw_view(con, "prs_raw", root / "data", org, repo, days_back, "created_at"):
-        con.execute("""
-            CREATE OR REPLACE VIEW prs_latest AS
-            SELECT * EXCLUDE (rn)
-            FROM (
-                SELECT
-                    *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY org, repo, pr_number
-                        ORDER BY COALESCE(collected_at, updated_at, created_at) DESC NULLS LAST
-                    ) AS rn
-                FROM prs_raw
-            )
-            WHERE rn = 1
-        """)
-        available.update({"prs_raw", "prs_latest"})
-
-    if _create_raw_view(con, "commits_raw", root / "ledger" / "commits", org, repo, days_back, "committed_at"):
-        con.execute("""
-            CREATE OR REPLACE VIEW commits_latest AS
-            SELECT * EXCLUDE (rn)
-            FROM (
-                SELECT
-                    *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY org, repo, sha
-                        ORDER BY COALESCE(collected_at, committed_at) DESC NULLS LAST
-                    ) AS rn
-                FROM commits_raw
-            )
-            WHERE rn = 1
-        """)
-        available.update({"commits_raw", "commits_latest"})
-
-    if _create_raw_view(con, "branches_raw", root / "ledger" / "branches", org, repo, None, None):
-        con.execute("""
-            CREATE OR REPLACE VIEW branches_latest AS
-            SELECT * EXCLUDE (rn)
-            FROM (
-                SELECT
-                    *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY org, repo, branch
-                        ORDER BY COALESCE(collected_at, last_commit_at) DESC NULLS LAST
-                    ) AS rn
-                FROM branches_raw
-            )
-            WHERE rn = 1
-        """)
-        available.update({"branches_raw", "branches_latest"})
-
-    if _create_raw_view(con, "commit_files_raw", root / "ledger" / "commit_files", org, repo, days_back, None):
-        con.execute("""
-            CREATE OR REPLACE VIEW commit_files_latest AS
-            SELECT * EXCLUDE (rn)
-            FROM (
-                SELECT
-                    *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY org, repo, sha, path
-                        ORDER BY collected_at DESC NULLS LAST
-                    ) AS rn
-                FROM commit_files_raw
-            )
-            WHERE rn = 1
-        """)
-        available.update({"commit_files_raw", "commit_files_latest"})
-
+    for config in DELIVERY_DATASETS:
+        available.update(_create_delivery_dataset_views(con, root, config, org, repo, days_back))
     return con, available
 
 

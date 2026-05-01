@@ -28,6 +28,7 @@ CONVENTIONAL_ACTIVITY = {
 }
 
 SENSITIVE_KEYWORDS = ("auth", "jwt", "token", "permission", "secret", "password", "oauth")
+DEPENDENCY_FILES = {"package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "uv.lock", "poetry.lock"}
 
 
 def extract_task_id(*texts: str | None) -> str | None:
@@ -127,6 +128,40 @@ def is_sensitive_path(path: str | None) -> bool:
     return any(keyword in lowered for keyword in SENSITIVE_KEYWORDS)
 
 
+def _normalise_paths(paths: Iterable[str] | None) -> list[str]:
+    """Return lowercase non-empty paths for activity classification."""
+    return [path.lower() for path in (paths or []) if path]
+
+
+def _has_agent_tooling_path(paths: list[str]) -> bool:
+    return any(path.startswith(".claude/") or path.startswith(".opencode/") or path.endswith("agents.md") for path in paths)
+
+
+def _all_docs_paths(paths: list[str]) -> bool:
+    return bool(paths) and all(path.startswith("docs/") or path.endswith(".md") for path in paths)
+
+
+def _has_infra_path(paths: list[str]) -> bool:
+    return any(path.startswith("infra/") or "terraform" in path or "pulumi" in path for path in paths)
+
+
+def _has_dependency_path(paths: list[str]) -> bool:
+    return any(Path(path).name in DEPENDENCY_FILES for path in paths)
+
+
+def _has_security_signal(subject: str, paths: list[str]) -> bool:
+    return any(keyword in subject for keyword in SENSITIVE_KEYWORDS) or any(is_sensitive_path(path) for path in paths)
+
+
+PATH_ACTIVITY_RULES = (
+    ("agent_tooling", _has_agent_tooling_path),
+    ("test", lambda paths: any(is_test_path(path) for path in paths)),
+    ("docs", _all_docs_paths),
+    ("infra", _has_infra_path),
+    ("dependency", _has_dependency_path),
+)
+
+
 def classify_activity(
     subject: str | None,
     paths: Iterable[str] | None = None,
@@ -134,29 +169,19 @@ def classify_activity(
 ) -> str:
     """Classify commit activity from Conventional Commit type, paths, and keywords."""
     lowered_subject = (subject or "").lower()
-
     if lowered_subject.startswith("revert") or "revert" in lowered_subject:
         return "revert"
 
-    if conventional_type:
-        mapped = CONVENTIONAL_ACTIVITY.get(conventional_type.lower())
-        if mapped:
-            return mapped
+    mapped = CONVENTIONAL_ACTIVITY.get((conventional_type or "").lower())
+    if mapped:
+        return mapped
 
-    paths_list = [path for path in (paths or []) if path]
-    lowered_paths = [path.lower() for path in paths_list]
+    lowered_paths = _normalise_paths(paths)
+    for activity, predicate in PATH_ACTIVITY_RULES:
+        if predicate(lowered_paths):
+            return activity
 
-    if any(path.startswith(".claude/") or path.startswith(".opencode/") or path.endswith("agents.md") for path in lowered_paths):
-        return "agent_tooling"
-    if any(is_test_path(path) for path in lowered_paths):
-        return "test"
-    if lowered_paths and all(path.startswith("docs/") or path.endswith(".md") for path in lowered_paths):
-        return "docs"
-    if any(path.startswith("infra/") or "terraform" in path or "pulumi" in path for path in lowered_paths):
-        return "infra"
-    if any(Path(path).name in {"package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "uv.lock", "poetry.lock"} for path in lowered_paths):
-        return "dependency"
-    if any(keyword in lowered_subject for keyword in SENSITIVE_KEYWORDS) or any(is_sensitive_path(path) for path in lowered_paths):
+    if _has_security_signal(lowered_subject, lowered_paths):
         return "security_auth"
 
     return "other"

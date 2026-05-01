@@ -178,104 +178,156 @@ def is_self_merged(pr):
     return author_login == merged_by_login if (author_login and merged_by_login) else False
 
 
+
+def _pr_author_login(pr):
+    """Return a PR author login with the legacy unknown fallback."""
+    return pr.get('author', {}).get('login', 'unknown') if pr.get('author') else 'unknown'
+
+
+def _pr_state(merged_at, closed_at):
+    """Map PR lifecycle timestamps to the stored state label."""
+    if merged_at is not None:
+        return 'merged'
+    return 'closed' if closed_at is not None else 'open'
+
+
+def _timestamp_partition(value):
+    """Return year/month partition values for an optional timestamp."""
+    if value is None:
+        return None, None
+    return value.year, value.month
+
+
+def _pr_labels(pr):
+    """Return comma-separated PR label names."""
+    return ','.join([label.get('name', '') for label in pr.get('labels', [])])
+
+
+
+def _pr_timestamps(pr):
+    """Return parsed PR lifecycle timestamps."""
+    return {
+        'created_at': _parse_dt(pr.get('createdAt')),
+        'updated_at': _parse_dt(pr.get('updatedAt')),
+        'merged_at': _parse_dt(pr.get('mergedAt')),
+        'closed_at': _parse_dt(pr.get('closedAt')),
+    }
+
+
+def _pr_size_fields(pr):
+    """Return PR size fields."""
+    additions = pr.get('additions', 0) or 0
+    deletions = pr.get('deletions', 0) or 0
+    return {'additions': additions, 'deletions': deletions, 'pr_size': additions + deletions}
+
+
+def _pr_review_fields(pr):
+    """Return PR review, reviewer queue, and CI summary fields."""
+    reviews_count, reviewers_string = extract_reviews_data(pr)
+    review_request_count, requested_reviewers = extract_review_request_data(pr)
+    approvals_count, changes_requested_count = get_review_state_counts(pr)
+    ci_state, checks_failed_count, checks_pending_count = extract_ci_summary(pr)
+    return {
+        'reviews': reviews_count,
+        'reviewers': reviewers_string,
+        'review_decision': pr.get('reviewDecision'),
+        'review_request_count': review_request_count,
+        'requested_reviewers': requested_reviewers,
+        'first_review_at': get_first_review_at(pr),
+        'latest_review_at': get_latest_review_at(pr),
+        'approvals_count': approvals_count,
+        'changes_requested_count': changes_requested_count,
+        'ci_state': ci_state,
+        'checks_failed_count': checks_failed_count,
+        'checks_pending_count': checks_pending_count,
+    }
+
+
+def _pr_traceability_fields(pr):
+    """Return task/spec traceability fields for a PR."""
+    return {
+        'task_id': extract_task_id(pr.get('title'), pr.get('body'), pr.get('headRefName')),
+        'spec_name': extract_spec_name(pr.get('title'), pr.get('body'), pr.get('headRefName')),
+    }
+
+
+def _pr_timing_fields(pr, timestamps):
+    """Return derived PR timing fields."""
+    created_at = timestamps['created_at']
+    merged_at = timestamps['merged_at']
+    return {
+        'time_to_merge_hours': (merged_at - created_at).total_seconds() / 3600 if merged_at is not None and created_at is not None else None,
+        'time_to_first_review_hours': calculate_time_to_first_review(pr),
+    }
+
+
+def _pr_identity_fields(org, repo_name, pr, collected_at, created_at):
+    """Return PR identity and partition fields."""
+    year, month = _timestamp_partition(created_at)
+    return {
+        'org': org,
+        'repo': repo_name,
+        'year': year,
+        'month': month,
+        'collected_at': collected_at,
+        'pr_number': pr.get('number'),
+        'author': _pr_author_login(pr),
+        'title': pr.get('title'),
+        'url': pr.get('url'),
+    }
+
+
+def _pr_branch_fields(pr):
+    """Return PR branch pointer fields."""
+    return {
+        'head_ref': pr.get('headRefName'),
+        'base_ref': pr.get('baseRefName'),
+        'head_sha': pr.get('headRefOid'),
+    }
+
+
+def _pr_misc_fields(pr):
+    """Return remaining PR metadata fields."""
+    return {
+        'commits': extract_commits_count(pr),
+        'mergeable': pr.get('mergeable'),
+        'merge_state_status': pr.get('mergeStateStatus'),
+        'merged_by': extract_merged_by(pr),
+        'changed_files': pr.get('changedFiles', 0),
+        'comments_count': len(pr.get('comments') or []),
+        'self_merged': is_self_merged(pr),
+        'is_draft': pr.get('isDraft', False),
+        'labels': _pr_labels(pr),
+    }
+
+
+def _build_pr_row(org, repo_name, pr, collected_at):
+    """Transform one GitHub PR object into a storage row."""
+    timestamps = _pr_timestamps(pr)
+    return {
+        **_pr_identity_fields(org, repo_name, pr, collected_at, timestamps['created_at']),
+        **timestamps,
+        'state': _pr_state(timestamps['merged_at'], timestamps['closed_at']),
+        **_pr_branch_fields(pr),
+        **_pr_size_fields(pr),
+        **_pr_review_fields(pr),
+        **_pr_timing_fields(pr, timestamps),
+        **_pr_misc_fields(pr),
+        **_pr_traceability_fields(pr),
+    }
+
+
 def process_prs_to_dataframe(all_prs_data, org):
-    """Transform all PR data into structured list for DuckDB
+    """Transform all PR data into structured list for DuckDB.
 
     Returns list of dictionaries with partition columns added.
     """
-    rows = []
     collected_at = pd.Timestamp(datetime.now(timezone.utc))
-
-    for repo_name, prs in all_prs_data.items():
-        for pr in prs:
-            # Safe data extraction
-            author = pr.get('author', {}).get('login', 'unknown') if pr.get('author') else 'unknown'
-            created_at = _parse_dt(pr.get('createdAt'))
-            merged_at = _parse_dt(pr.get('mergedAt'))
-            closed_at = _parse_dt(pr.get('closedAt'))
-            updated_at = _parse_dt(pr.get('updatedAt'))
-
-            # Calculate metrics
-            additions = pr.get('additions', 0) or 0
-            deletions = pr.get('deletions', 0) or 0
-            pr_size = additions + deletions
-            time_to_merge = (merged_at - created_at).total_seconds() / 3600 if merged_at is not None and created_at is not None else None
-
-            # Extract enhanced data using helper functions
-            commits_count = extract_commits_count(pr)
-            reviews_count, reviewers_string = extract_reviews_data(pr)
-            time_to_first_review = calculate_time_to_first_review(pr)
-            merged_by_login = extract_merged_by(pr)
-            self_merged = is_self_merged(pr)
-            review_request_count, requested_reviewers = extract_review_request_data(pr)
-            approvals_count, changes_requested_count = get_review_state_counts(pr)
-            ci_state, checks_failed_count, checks_pending_count = extract_ci_summary(pr)
-            first_review_at = get_first_review_at(pr)
-            latest_review_at = get_latest_review_at(pr)
-
-            # Get additional fields
-            changed_files = pr.get('changedFiles', 0)
-            comments = pr.get('comments', [])
-            comments_count = len(comments) if comments else 0
-
-            state = 'merged' if merged_at is not None else ('closed' if closed_at is not None else 'open')
-            labels = ','.join([label.get('name', '') for label in pr.get('labels', [])])
-            task_id = extract_task_id(pr.get('title'), pr.get('body'), pr.get('headRefName'))
-            spec_name = extract_spec_name(pr.get('title'), pr.get('body'), pr.get('headRefName'))
-
-            # Add partition columns for Hive partitioning
-            year = created_at.year if created_at is not None else None
-            month = created_at.month if created_at is not None else None
-
-            rows.append({
-                'org': org,
-                'repo': repo_name,
-                'year': year,
-                'month': month,
-                'collected_at': collected_at,
-                'pr_number': pr.get('number'),
-                'author': author,
-                'title': pr.get('title'),
-                'url': pr.get('url'),
-                'created_at': created_at,
-                'updated_at': updated_at,
-                'merged_at': merged_at,
-                'closed_at': closed_at,
-                'state': state,
-                'head_ref': pr.get('headRefName'),
-                'base_ref': pr.get('baseRefName'),
-                'head_sha': pr.get('headRefOid'),
-                'additions': additions,
-                'deletions': deletions,
-                'pr_size': pr_size,
-                'commits': commits_count,
-                'reviews': reviews_count,
-                'reviewers': reviewers_string,
-                'review_decision': pr.get('reviewDecision'),
-                'review_request_count': review_request_count,
-                'requested_reviewers': requested_reviewers,
-                'first_review_at': first_review_at,
-                'latest_review_at': latest_review_at,
-                'approvals_count': approvals_count,
-                'changes_requested_count': changes_requested_count,
-                'ci_state': ci_state,
-                'checks_failed_count': checks_failed_count,
-                'checks_pending_count': checks_pending_count,
-                'mergeable': pr.get('mergeable'),
-                'merge_state_status': pr.get('mergeStateStatus'),
-                'time_to_merge_hours': time_to_merge,
-                'time_to_first_review_hours': time_to_first_review,
-                'merged_by': merged_by_login,
-                'changed_files': changed_files,
-                'comments_count': comments_count,
-                'self_merged': self_merged,
-                'is_draft': pr.get('isDraft', False),
-                'labels': labels,
-                'task_id': task_id,
-                'spec_name': spec_name,
-            })
-
-    return rows
+    return [
+        _build_pr_row(org, repo_name, pr, collected_at)
+        for repo_name, prs in all_prs_data.items()
+        for pr in prs
+    ]
 
 
 def _commit_paths(commit):
@@ -289,85 +341,160 @@ def _extract_pr_number_from_subject(subject):
     return int(match.group(1)) if match else None
 
 
+
+def _commit_message_parts(commit_obj):
+    """Split a GitHub commit message into subject and body."""
+    message = commit_obj.get('message') or ''
+    subject, _, body = message.partition('\n')
+    return subject, body
+
+
+def _commit_path_summary(paths):
+    """Return compact directory and extension summaries for commit paths."""
+    return {
+        'top_level_dirs': ','.join(sorted({top_level_dir(path) for path in paths if top_level_dir(path)})),
+        'file_exts': ','.join(sorted({file_extension(path) for path in paths if file_extension(path)})),
+    }
+
+
+
+def _commit_core_fields(org, repo_name, commit, collected_at, committed_at):
+    """Return stable identity and partition fields for a commit row."""
+    year, month = _timestamp_partition(committed_at)
+    return {
+        'org': org,
+        'repo': repo_name,
+        'year': year,
+        'month': month,
+        'collected_at': collected_at,
+        'sha': commit.get('sha'),
+    }
+
+
+def _commit_actor_fields(commit_obj, committed_at):
+    """Return author/committer fields for a commit row."""
+    author_obj = commit_obj.get('author') or {}
+    committer_obj = commit_obj.get('committer') or {}
+    return {
+        'author_name': author_obj.get('name'),
+        'author_email': author_obj.get('email'),
+        'committer_name': committer_obj.get('name'),
+        'committer_email': committer_obj.get('email'),
+        'authored_at': _parse_dt(author_obj.get('date')),
+        'committed_at': committed_at,
+    }
+
+
+def _commit_change_fields(commit, files, paths):
+    """Return size and path summary fields for a commit row."""
+    stats = commit.get('stats') or {}
+    path_summary = _commit_path_summary(paths)
+    return {
+        'additions': stats.get('additions'),
+        'deletions': stats.get('deletions'),
+        'changed_files': len(files) if files else None,
+        'top_level_dirs': path_summary['top_level_dirs'],
+        'file_exts': path_summary['file_exts'],
+    }
+
+
+def _commit_traceability_fields(subject, body, paths):
+    """Return task/spec traceability fields for a commit row."""
+    searchable_paths = ' '.join(paths)
+    return {
+        'task_id': extract_task_id(subject, body, searchable_paths),
+        'spec_name': extract_spec_name(subject, body, searchable_paths),
+    }
+
+
+def _commit_message_fields(subject, body, conventional_type, conventional_scope, activity_class):
+    """Return message/classification fields for a commit row."""
+    return {
+        'subject': subject,
+        'body': body.strip() or None,
+        'conventional_type': conventional_type,
+        'conventional_scope': conventional_scope,
+        'activity_class': activity_class,
+    }
+
+
+def _build_commit_row(org, repo_name, commit, collected_at):
+    """Transform one GitHub commit detail into a commit ledger row."""
+    commit_obj = commit.get('commit') or {}
+    committer_obj = commit_obj.get('committer') or {}
+    subject, body = _commit_message_parts(commit_obj)
+    files = commit.get('files') or []
+    paths = _commit_paths(commit)
+    conventional_type, conventional_scope = parse_conventional_commit(subject)
+    activity_class = classify_activity(subject, paths, conventional_type)
+    parent_count = len(commit.get('parents') or [])
+    committed_at = _parse_dt(committer_obj.get('date'))
+    pr_number = _extract_pr_number_from_subject(subject)
+
+    return {
+        **_commit_core_fields(org, repo_name, commit, collected_at, committed_at),
+        **_commit_actor_fields(commit_obj, committed_at),
+        **_commit_message_fields(subject, body, conventional_type, conventional_scope, activity_class),
+        'parent_count': parent_count,
+        'is_merge_commit': parent_count > 1,
+        'is_revert': activity_class == 'revert',
+        'branch_refs': 'default',
+        'on_main': True,
+        'is_direct_main': _is_direct_main(parent_count, pr_number),
+        'pr_number': pr_number,
+        **_commit_change_fields(commit, files, paths),
+        **_commit_traceability_fields(subject, body, paths),
+    }
+
+
+def _is_direct_main(parent_count, pr_number):
+    """Return whether a default-branch commit appears unlinked from a PR."""
+    return parent_count == 1 and pr_number is None
+
+
+def _build_commit_file_row(org, repo_name, commit, file, committed_at, collected_at):
+    """Transform one changed file from a commit detail into a file-fact row."""
+    path = file.get('filename')
+    year, month = _timestamp_partition(committed_at)
+    return {
+        'org': org,
+        'repo': repo_name,
+        'year': year,
+        'month': month,
+        'collected_at': collected_at,
+        'sha': commit.get('sha'),
+        'path': path,
+        'status': file.get('status'),
+        'additions': file.get('additions'),
+        'deletions': file.get('deletions'),
+        'top_level_dir': top_level_dir(path),
+        'extension': file_extension(path),
+        'is_test': is_test_path(path),
+        'is_generated': is_generated_path(path),
+        'is_sensitive': is_sensitive_path(path),
+    }
+
+
+def _build_commit_file_rows(org, repo_name, commit, collected_at):
+    """Transform all file facts for one commit detail."""
+    commit_obj = commit.get('commit') or {}
+    committed_at = _parse_dt((commit_obj.get('committer') or {}).get('date'))
+    return [
+        _build_commit_file_row(org, repo_name, commit, file, committed_at, collected_at)
+        for file in (commit.get('files') or [])
+    ]
+
+
 def process_commits_to_rows(all_commits_data, org):
     """Transform GitHub commit details into commit and commit-file rows."""
+    collected_at = pd.Timestamp(datetime.now(timezone.utc))
     commit_rows = []
     file_rows = []
-    collected_at = pd.Timestamp(datetime.now(timezone.utc))
 
     for repo_name, commits in all_commits_data.items():
         for commit in commits:
-            sha = commit.get('sha')
-            commit_obj = commit.get('commit') or {}
-            author_obj = commit_obj.get('author') or {}
-            committer_obj = commit_obj.get('committer') or {}
-            message = commit_obj.get('message') or ''
-            subject, _, body = message.partition('\n')
-            files = commit.get('files') or []
-            paths = _commit_paths(commit)
-            conventional_type, conventional_scope = parse_conventional_commit(subject)
-            activity_class = classify_activity(subject, paths, conventional_type)
-            parent_count = len(commit.get('parents') or [])
-            authored_at = _parse_dt(author_obj.get('date'))
-            committed_at = _parse_dt(committer_obj.get('date'))
-            stats = commit.get('stats') or {}
-            task_id = extract_task_id(subject, body, ' '.join(paths))
-            spec_name = extract_spec_name(subject, body, ' '.join(paths))
-            pr_number = _extract_pr_number_from_subject(subject)
-
-            commit_rows.append({
-                'org': org,
-                'repo': repo_name,
-                'year': committed_at.year if committed_at is not None else None,
-                'month': committed_at.month if committed_at is not None else None,
-                'collected_at': collected_at,
-                'sha': sha,
-                'author_name': author_obj.get('name'),
-                'author_email': author_obj.get('email'),
-                'committer_name': committer_obj.get('name'),
-                'committer_email': committer_obj.get('email'),
-                'authored_at': authored_at,
-                'committed_at': committed_at,
-                'subject': subject,
-                'body': body.strip() or None,
-                'parent_count': parent_count,
-                'is_merge_commit': parent_count > 1,
-                'is_revert': activity_class == 'revert',
-                'branch_refs': 'default',
-                'on_main': True,
-                'is_direct_main': parent_count == 1 and pr_number is None,
-                'pr_number': pr_number,
-                'additions': stats.get('additions'),
-                'deletions': stats.get('deletions'),
-                'changed_files': len(files) if files else None,
-                'top_level_dirs': ','.join(sorted({top_level_dir(path) for path in paths if top_level_dir(path)})),
-                'file_exts': ','.join(sorted({file_extension(path) for path in paths if file_extension(path)})),
-                'task_id': task_id,
-                'spec_name': spec_name,
-                'conventional_type': conventional_type,
-                'conventional_scope': conventional_scope,
-                'activity_class': activity_class,
-            })
-
-            for file in files:
-                path = file.get('filename')
-                file_rows.append({
-                    'org': org,
-                    'repo': repo_name,
-                    'year': committed_at.year if committed_at is not None else None,
-                    'month': committed_at.month if committed_at is not None else None,
-                    'collected_at': collected_at,
-                    'sha': sha,
-                    'path': path,
-                    'status': file.get('status'),
-                    'additions': file.get('additions'),
-                    'deletions': file.get('deletions'),
-                    'top_level_dir': top_level_dir(path),
-                    'extension': file_extension(path),
-                    'is_test': is_test_path(path),
-                    'is_generated': is_generated_path(path),
-                    'is_sensitive': is_sensitive_path(path),
-                })
+            commit_rows.append(_build_commit_row(org, repo_name, commit, collected_at))
+            file_rows.extend(_build_commit_file_rows(org, repo_name, commit, collected_at))
 
     return commit_rows, file_rows
 

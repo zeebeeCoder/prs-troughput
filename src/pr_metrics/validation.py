@@ -119,13 +119,80 @@ def validate_local_repo(
     return ValidationResult(commit_summary, commit_mismatches, branch_summary, branch_mismatches)
 
 
+
+def _missing_dataset_result(dataset: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return the standard result when a parquet dataset is unavailable."""
+    return pd.DataFrame([{"dataset": dataset, "status": "missing_parquet"}]), pd.DataFrame()
+
+
+def _clean_parquet_value(value):
+    """Normalize pandas missing scalars before comparing with local Git values."""
+    return None if pd.isna(value) else value
+
+
+def _validation_summary(dataset, total, present, comparable, exact, field_mismatch_count, issue_count):
+    """Build the standard validation summary DataFrame."""
+    denominator = comparable if dataset == "branches" else present
+    return pd.DataFrame([{
+        "dataset": dataset,
+        "parquet_rows": total,
+        "present_locally": present,
+        "comparable_rows": comparable,
+        "exact_rows": exact,
+        "missing_locally": total - present,
+        "field_mismatch_count": field_mismatch_count,
+        "issue_count": issue_count,
+        "accuracy_pct": round(100.0 * exact / denominator, 1) if denominator else None,
+    }])
+
+
+def _commit_comparisons(repo_path: Path, row) -> dict[str, tuple[object, object]]:
+    """Return local-vs-parquet field comparisons for a commit row."""
+    sha = row["sha"]
+    additions, deletions, files = _commit_numstat(repo_path, sha)
+    return {
+        "parent_count": (_commit_parent_count(repo_path, sha), row.get("parent_count")),
+        "additions": (additions, row.get("additions")),
+        "deletions": (deletions, row.get("deletions")),
+        "changed_files": (files, row.get("changed_files")),
+        "subject": (_commit_subject(repo_path, sha), row.get("subject")),
+    }
+
+
+def _commit_field_issues(repo_path: Path, row) -> list[dict[str, object]]:
+    """Return field mismatch issues for one locally present commit."""
+    issues = []
+    sha = row["sha"]
+    for field, (local_value, parquet_value) in _commit_comparisons(repo_path, row).items():
+        parquet_value = _clean_parquet_value(parquet_value)
+        if local_value != parquet_value:
+            issues.append({
+                "kind": "commit_field_mismatch",
+                "sha": sha[:8],
+                "field": field,
+                "local": local_value,
+                "parquet": parquet_value,
+            })
+    return issues
+
+
+def _validate_commit_row(repo_path: Path, row) -> tuple[bool, bool, list[dict[str, object]]]:
+    """Validate one commit row. Returns (present_locally, exact, issues)."""
+    sha = row["sha"]
+    if not sha or not _commit_exists(repo_path, sha):
+        return False, False, [{"kind": "commit_missing_locally", "sha": sha, "field": "sha"}]
+
+    issues = _commit_field_issues(repo_path, row)
+    return True, not issues, issues
+
+
 def _validate_commits(
     con,
     available: set[str],
     repo_path: Path,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if "commits_latest" not in available:
-        return pd.DataFrame([{"dataset": "commits", "status": "missing_parquet"}]), pd.DataFrame()
+        return _missing_dataset_result("commits")
 
     commits = con.execute("""
         SELECT sha, parent_count, additions, deletions, changed_files, subject
@@ -134,58 +201,93 @@ def _validate_commits(
     """).fetchdf()
 
     issues = []
-    present = 0
-    exact = 0
-    field_mismatch_count = 0
+    present = exact = field_mismatch_count = 0
     for row in commits.to_dict("records"):
-        sha = row["sha"]
-        if not sha or not _commit_exists(repo_path, sha):
-            issues.append({"kind": "commit_missing_locally", "sha": sha, "field": "sha"})
-            continue
+        row_present, row_exact, row_issues = _validate_commit_row(repo_path, row)
+        present += int(row_present)
+        exact += int(row_exact)
+        field_mismatch_count += sum(1 for issue in row_issues if issue["kind"] == "commit_field_mismatch")
+        issues.extend(row_issues)
 
-        present += 1
-        local_parent_count = _commit_parent_count(repo_path, sha)
-        local_additions, local_deletions, local_files = _commit_numstat(repo_path, sha)
-        local_subject = _commit_subject(repo_path, sha)
-        row_exact = True
-
-        comparisons = {
-            "parent_count": (local_parent_count, row.get("parent_count")),
-            "additions": (local_additions, row.get("additions")),
-            "deletions": (local_deletions, row.get("deletions")),
-            "changed_files": (local_files, row.get("changed_files")),
-            "subject": (local_subject, row.get("subject")),
-        }
-        for field, (local_value, parquet_value) in comparisons.items():
-            if pd.isna(parquet_value):
-                parquet_value = None
-            if local_value != parquet_value:
-                row_exact = False
-                field_mismatch_count += 1
-                issues.append({
-                    "kind": "commit_field_mismatch",
-                    "sha": sha[:8],
-                    "field": field,
-                    "local": local_value,
-                    "parquet": parquet_value,
-                })
-
-        if row_exact:
-            exact += 1
-
-    total = len(commits)
-    summary = pd.DataFrame([{
-        "dataset": "commits",
-        "parquet_rows": total,
-        "present_locally": present,
-        "comparable_rows": present,
-        "exact_rows": exact,
-        "missing_locally": total - present,
-        "field_mismatch_count": field_mismatch_count,
-        "issue_count": len(issues),
-        "accuracy_pct": round(100.0 * exact / present, 1) if present else None,
-    }])
+    summary = _validation_summary("commits", len(commits), present, present, exact, field_mismatch_count, len(issues))
     return summary, pd.DataFrame(issues)
+
+
+def _branch_rows(con) -> pd.DataFrame:
+    """Load branch validation rows while tolerating older schemas."""
+    columns = set(con.execute("DESCRIBE branches_latest").fetchdf()["column_name"])
+    default_branch_expr = "default_branch" if "default_branch" in columns else "NULL::VARCHAR AS default_branch"
+    default_head_expr = "default_head_sha" if "default_head_sha" in columns else "NULL::VARCHAR AS default_head_sha"
+    return con.execute(f"""
+        SELECT branch, head_sha, ahead_main, behind_main, {default_branch_expr}, {default_head_expr}
+        FROM branches_latest
+        ORDER BY branch
+    """).fetchdf()
+
+
+def _resolve_base_sha(repo_path: Path, row, remote: str):
+    """Resolve the default branch base SHA for ahead/behind comparison."""
+    base_sha = row.get("default_head_sha")
+    default_branch = row.get("default_branch")
+    if not base_sha and default_branch and _remote_ref_exists(repo_path, default_branch, remote):
+        return _remote_ref_sha(repo_path, default_branch, remote)
+    return base_sha
+
+
+def _branch_field_issue(branch, field, local_value, parquet_value):
+    """Build a branch field mismatch issue."""
+    return {
+        "kind": "branch_field_mismatch",
+        "branch": branch,
+        "field": field,
+        "local": local_value,
+        "parquet": parquet_value,
+    }
+
+
+def _branch_head_issue(row, local_head):
+    """Return a head SHA mismatch issue."""
+    return _branch_field_issue(row["branch"], "head_sha", local_head[:8], (row.get("head_sha") or "")[:8])
+
+
+def _branch_ahead_behind_issues(repo_path: Path, row, base_sha: str, remote: str) -> list[dict[str, object]]:
+    """Return ahead/behind mismatch issues for a comparable branch."""
+    local_ahead, local_behind = _ahead_behind(repo_path, base_sha, row["branch"], remote)
+    issues = []
+    for field, local_value in (("ahead_main", local_ahead), ("behind_main", local_behind)):
+        parquet_value = _clean_parquet_value(row.get(field))
+        if local_value != parquet_value:
+            issues.append(_branch_field_issue(row["branch"], field, local_value, parquet_value))
+    return issues
+
+
+def _missing_default_head_issue(row, base_sha, head_matches):
+    """Return issue for a branch whose default base cannot be compared locally."""
+    issue_kind = "default_head_missing_locally" if head_matches else "local_ref_differs_and_default_head_missing"
+    return {
+        "kind": issue_kind,
+        "branch": row["branch"],
+        "field": "default_head_sha",
+        "local": None,
+        "parquet": (base_sha or "")[:8],
+    }
+
+
+def _validate_branch_row(repo_path: Path, row, remote: str) -> dict[str, object]:
+    """Validate one branch row and return stats plus issues."""
+    branch = row["branch"]
+    if not branch or not _remote_ref_exists(repo_path, branch, remote):
+        return {"present": False, "comparable": False, "exact": False, "issues": [{"kind": "branch_ref_missing_locally", "branch": branch, "field": "ref"}]}
+
+    local_head = _remote_ref_sha(repo_path, branch, remote)
+    base_sha = _resolve_base_sha(repo_path, row, remote)
+    head_matches = local_head == row.get("head_sha")
+    if not (base_sha and _commit_exists(repo_path, base_sha)):
+        return {"present": True, "comparable": False, "exact": False, "issues": [_missing_default_head_issue(row, base_sha, head_matches)]}
+
+    issues = [] if head_matches else [_branch_head_issue(row, local_head)]
+    issues.extend(_branch_ahead_behind_issues(repo_path, row, base_sha, remote))
+    return {"present": True, "comparable": True, "exact": not issues, "issues": issues}
 
 
 def _validate_branches(
@@ -195,92 +297,19 @@ def _validate_branches(
     remote: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if "branches_latest" not in available:
-        return pd.DataFrame([{"dataset": "branches", "status": "missing_parquet"}]), pd.DataFrame()
+        return _missing_dataset_result("branches")
 
-    columns = set(con.execute("DESCRIBE branches_latest").fetchdf()["column_name"])
-    default_branch_expr = "default_branch" if "default_branch" in columns else "NULL::VARCHAR AS default_branch"
-    default_head_expr = "default_head_sha" if "default_head_sha" in columns else "NULL::VARCHAR AS default_head_sha"
-    branches = con.execute(f"""
-        SELECT branch, head_sha, ahead_main, behind_main, {default_branch_expr}, {default_head_expr}
-        FROM branches_latest
-        ORDER BY branch
-    """).fetchdf()
-
+    branches = _branch_rows(con)
     issues = []
-    present = 0
-    comparable = 0
-    exact = 0
-    field_mismatch_count = 0
+    present = comparable = exact = field_mismatch_count = 0
     for row in branches.to_dict("records"):
-        branch = row["branch"]
-        if not branch or not _remote_ref_exists(repo_path, branch, remote):
-            issues.append({"kind": "branch_ref_missing_locally", "branch": branch, "field": "ref"})
-            continue
+        result = _validate_branch_row(repo_path, row, remote)
+        present += int(result["present"])
+        comparable += int(result["comparable"])
+        exact += int(result["exact"])
+        row_issues = result["issues"]
+        field_mismatch_count += sum(1 for issue in row_issues if issue["kind"] == "branch_field_mismatch")
+        issues.extend(row_issues)
 
-        present += 1
-        local_head = _remote_ref_sha(repo_path, branch, remote)
-        base_sha = row.get("default_head_sha")
-        row_exact = True
-        head_matches = local_head == row.get("head_sha")
-
-        if not base_sha:
-            default_branch = row.get("default_branch")
-            if default_branch and _remote_ref_exists(repo_path, default_branch, remote):
-                base_sha = _remote_ref_sha(repo_path, default_branch, remote)
-
-        if base_sha and _commit_exists(repo_path, base_sha):
-            comparable += 1
-            if not head_matches:
-                row_exact = False
-                field_mismatch_count += 1
-                issues.append({
-                    "kind": "branch_field_mismatch",
-                    "branch": branch,
-                    "field": "head_sha",
-                    "local": local_head[:8],
-                    "parquet": (row.get("head_sha") or "")[:8],
-                })
-
-            local_ahead, local_behind = _ahead_behind(repo_path, base_sha, branch, remote)
-            for field, local_value in (("ahead_main", local_ahead), ("behind_main", local_behind)):
-                parquet_value = row.get(field)
-                if pd.isna(parquet_value):
-                    parquet_value = None
-                if local_value != parquet_value:
-                    row_exact = False
-                    field_mismatch_count += 1
-                    issues.append({
-                        "kind": "branch_field_mismatch",
-                        "branch": branch,
-                        "field": field,
-                        "local": local_value,
-                        "parquet": parquet_value,
-                    })
-
-            if row_exact:
-                exact += 1
-        else:
-            issue_kind = "default_head_missing_locally"
-            if not head_matches:
-                issue_kind = "local_ref_differs_and_default_head_missing"
-            issues.append({
-                "kind": issue_kind,
-                "branch": branch,
-                "field": "default_head_sha",
-                "local": None,
-                "parquet": (base_sha or "")[:8],
-            })
-
-    total = len(branches)
-    summary = pd.DataFrame([{
-        "dataset": "branches",
-        "parquet_rows": total,
-        "present_locally": present,
-        "comparable_rows": comparable,
-        "exact_rows": exact,
-        "missing_locally": total - present,
-        "field_mismatch_count": field_mismatch_count,
-        "issue_count": len(issues),
-        "accuracy_pct": round(100.0 * exact / comparable, 1) if comparable else None,
-    }])
+    summary = _validation_summary("branches", len(branches), present, comparable, exact, field_mismatch_count, len(issues))
     return summary, pd.DataFrame(issues)

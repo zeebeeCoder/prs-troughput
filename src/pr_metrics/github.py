@@ -164,6 +164,52 @@ def get_open_pr_branch_map(org, repo_name, limit=100):
     return branch_map
 
 
+def _branch_head_sha(branch):
+    """Extract a branch head SHA from a GitHub branch object."""
+    return ((branch.get('commit') or {}).get('sha')) if isinstance(branch, dict) else None
+
+
+def _branch_author(branch_detail):
+    """Extract latest commit author metadata from a branch detail response."""
+    if not isinstance(branch_detail, dict):
+        return {}
+    commit = ((branch_detail.get('commit') or {}).get('commit') or {})
+    return commit.get('author') or {}
+
+
+def _compare_count(compare, key):
+    """Read an ahead/behind count from a compare response."""
+    return compare.get(key) if isinstance(compare, dict) else None
+
+
+def _branch_snapshot_row(branch, default_branch, default_head_sha, branch_detail, compare, pr):
+    """Build one branch snapshot row from GitHub API responses."""
+    author = _branch_author(branch_detail)
+    return {
+        'branch': branch.get('name'),
+        'head_sha': _branch_head_sha(branch),
+        'default_branch': default_branch,
+        'default_head_sha': default_head_sha,
+        'last_commit_at': author.get('date'),
+        'last_author': author.get('name'),
+        'ahead_main': _compare_count(compare, 'ahead_by'),
+        'behind_main': _compare_count(compare, 'behind_by'),
+        'has_open_pr': pr is not None,
+        'pr_number': pr.get('number') if pr else None,
+        'pr_title': pr.get('title') if pr else None,
+        'pr_url': pr.get('url') if pr else None,
+    }
+
+
+def _fetch_branch_snapshot_inputs(org, repo_name, default_branch, branch):
+    """Fetch branch detail and compare responses for one branch."""
+    encoded_default = quote(default_branch, safe='')
+    encoded_branch = quote(branch['name'], safe='')
+    branch_detail = run_gh_api(f"repos/{org}/{repo_name}/branches/{encoded_branch}")
+    compare = run_gh_api(f"repos/{org}/{repo_name}/compare/{encoded_default}...{encoded_branch}")
+    return branch_detail, compare
+
+
 def get_repo_branches(org, repo_name, limit=100):
     """Collect remote branch snapshot facts for a repository using gh API."""
     default_branch = get_default_branch(org, repo_name)
@@ -174,38 +220,16 @@ def get_repo_branches(org, repo_name, limit=100):
     open_prs = get_open_pr_branch_map(org, repo_name)
     encoded_default = quote(default_branch, safe='')
     default_detail = run_gh_api(f"repos/{org}/{repo_name}/branches/{encoded_default}")
-    default_head_sha = ((default_detail.get('commit') or {}).get('sha')) if isinstance(default_detail, dict) else None
+    default_head_sha = _branch_head_sha(default_detail)
     branches = run_gh_api(f"repos/{org}/{repo_name}/branches?per_page={min(limit, 100)}")
     rows = []
 
     for branch in branches[:limit]:
         name = branch.get('name')
-        sha = ((branch.get('commit') or {}).get('sha'))
-        if not name or not sha:
+        if not name or not _branch_head_sha(branch):
             continue
-
-        encoded_branch = quote(name, safe='')
-        branch_detail = run_gh_api(f"repos/{org}/{repo_name}/branches/{encoded_branch}")
-        compare = run_gh_api(f"repos/{org}/{repo_name}/compare/{encoded_default}...{encoded_branch}")
-
-        commit = ((branch_detail.get('commit') or {}).get('commit') or {}) if isinstance(branch_detail, dict) else {}
-        author = commit.get('author') or {}
-        pr = open_prs.get(name)
-
-        rows.append({
-            'branch': name,
-            'head_sha': sha,
-            'default_branch': default_branch,
-            'default_head_sha': default_head_sha,
-            'last_commit_at': author.get('date'),
-            'last_author': author.get('name'),
-            'ahead_main': compare.get('ahead_by') if isinstance(compare, dict) else None,
-            'behind_main': compare.get('behind_by') if isinstance(compare, dict) else None,
-            'has_open_pr': pr is not None,
-            'pr_number': pr.get('number') if pr else None,
-            'pr_title': pr.get('title') if pr else None,
-            'pr_url': pr.get('url') if pr else None,
-        })
+        branch_detail, compare = _fetch_branch_snapshot_inputs(org, repo_name, default_branch, branch)
+        rows.append(_branch_snapshot_row(branch, default_branch, default_head_sha, branch_detail, compare, open_prs.get(name)))
 
     return rows
 

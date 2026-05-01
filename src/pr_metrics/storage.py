@@ -5,6 +5,39 @@ import duckdb
 from pathlib import Path
 from datetime import datetime, timedelta
 
+import pandas as pd
+
+
+STRING_COLUMNS_BY_TABLE = {
+    "pr_data": (
+        "org", "repo", "author", "title", "url", "state", "head_ref", "base_ref",
+        "head_sha", "reviewers", "review_decision", "requested_reviewers", "ci_state",
+        "mergeable", "merge_state_status", "merged_by", "labels", "task_id", "spec_name",
+    ),
+    "commits": (
+        "org", "repo", "sha", "author_name", "author_email", "committer_name",
+        "committer_email", "subject", "body", "branch_refs", "top_level_dirs", "file_exts",
+        "task_id", "spec_name", "conventional_type", "conventional_scope", "activity_class",
+    ),
+    "branches": (
+        "org", "repo", "branch", "head_sha", "default_branch", "default_head_sha",
+        "last_author", "pr_title", "pr_url", "task_id", "spec_name",
+    ),
+    "commit_files": (
+        "org", "repo", "sha", "path", "status", "top_level_dir", "extension",
+    ),
+}
+
+
+def coerce_table_schema(df, table_name):
+    """Coerce known nullable text fields so all-null columns stay VARCHAR in Parquet."""
+    for column in STRING_COLUMNS_BY_TABLE.get(table_name, ()):  # keep generic writer usable for unknown tables
+        if column not in df.columns:
+            df[column] = pd.Series(pd.NA, index=df.index, dtype="string")
+        else:
+            df[column] = df[column].astype("string")
+    return df
+
 
 def get_partition_path(org, repo, created_at, base_dir="output/data"):
     """Generate Hive-style partition path for a PR
@@ -25,6 +58,34 @@ def get_partition_path(org, repo, created_at, base_dir="output/data"):
     return partition_dir
 
 
+def write_rows_to_hive(rows, base_dir, table_name="dataset", partition_by=("org", "repo", "year", "month")):
+    """Write generic row dictionaries to Hive-partitioned parquet files using DuckDB."""
+    if not rows:
+        print(f"⚠️  No {table_name} data to write")
+        return
+
+    Path(base_dir).mkdir(parents=True, exist_ok=True)
+    df = coerce_table_schema(pd.DataFrame(rows), table_name)
+    con = duckdb.connect()
+
+    try:
+        con.register("_rows_df", df)
+        con.execute(f"CREATE TEMP TABLE {table_name} AS SELECT * FROM _rows_df")
+        partition_cols = ', '.join(partition_by)
+        con.execute(f"""
+            COPY {table_name} TO '{base_dir}'
+            (FORMAT PARQUET, PARTITION_BY ({partition_cols}), OVERWRITE_OR_IGNORE)
+        """)
+
+        partitions = {
+            tuple(row.get(col) for col in partition_by)
+            for row in rows
+        }
+        print(f"✓ Wrote {len(rows)} {table_name} rows to {len(partitions)} partition(s) in {base_dir}")
+    finally:
+        con.close()
+
+
 def write_to_hive(pr_data_list, org, base_dir="output/data"):
     """Write PR data to Hive-partitioned parquet files using DuckDB
 
@@ -33,43 +94,7 @@ def write_to_hive(pr_data_list, org, base_dir="output/data"):
         org: Organization name
         base_dir: Base directory for Hive partitions
     """
-    import pandas as pd
-
-    if not pr_data_list:
-        print("⚠️  No data to write")
-        return
-
-    # Convert list to pandas DataFrame for DuckDB
-    df = pd.DataFrame(pr_data_list)
-
-    # Create DuckDB connection (in-memory)
-    con = duckdb.connect()
-
-    try:
-        # Register the DataFrame as a table
-        con.execute("CREATE TEMP TABLE pr_data AS SELECT * FROM df")
-
-        # Write to Hive-partitioned parquet
-        # DuckDB will automatically create the partition directories
-        query = f"""
-            COPY pr_data TO '{base_dir}'
-            (FORMAT PARQUET, PARTITION_BY (org, repo, year, month), OVERWRITE_OR_IGNORE)
-        """
-
-        con.execute(query)
-
-        # Count partitions written
-        partitions = set()
-        for pr in pr_data_list:
-            created_at = pr.get('created_at')
-            if created_at and isinstance(created_at, datetime):
-                repo = pr.get('repo', 'unknown')
-                partitions.add((org, repo, created_at.year, created_at.month))
-
-        print(f"✓ Wrote {len(pr_data_list)} PRs to {len(partitions)} partition(s) in {base_dir}")
-
-    finally:
-        con.close()
+    write_rows_to_hive(pr_data_list, base_dir=base_dir, table_name="pr_data")
 
 
 def load_from_hive(org=None, repo=None, base_dir="output/data", days_back=None):
@@ -124,7 +149,7 @@ def load_from_hive(org=None, repo=None, base_dir="output/data", days_back=None):
         # Verify data exists
         count = con.execute("SELECT COUNT(*) FROM pr_data").fetchone()[0]
         if count == 0:
-            print(f"ℹ️  No data found in Hive partitions matching criteria")
+            print("ℹ️  No data found in Hive partitions matching criteria")
             con.close()
             return None, None
 
@@ -135,6 +160,45 @@ def load_from_hive(org=None, repo=None, base_dir="output/data", days_back=None):
         # Handle case where no Hive data exists yet
         if "No files found" in str(e) or "does not exist" in str(e):
             print(f"ℹ️  No Hive-partitioned data found in {base_dir}")
+            con.close()
+            return None, None
+        raise
+
+
+def load_hive_dataset(dataset_dir, view_name, org=None, repo=None, days_back=None, date_column="created_at"):
+    """Load a Hive-partitioned ledger dataset into DuckDB.
+
+    Returns (connection, view_name) or (None, None) when no data exists.
+    """
+    con = duckdb.connect()
+    data_path = f"{dataset_dir}/**/*.parquet"
+    where_clauses = []
+
+    if org:
+        where_clauses.append(f"org = '{org}'")
+    if repo:
+        where_clauses.append(f"repo = '{repo}'")
+    if days_back and date_column:
+        cutoff_date = datetime.now() - timedelta(days=days_back)
+        cutoff_str = cutoff_date.strftime('%Y-%m-%d')
+        where_clauses.append(f"{date_column} >= '{cutoff_str}'")
+
+    query = f"""
+        CREATE OR REPLACE VIEW {view_name} AS
+        SELECT * FROM read_parquet('{data_path}', hive_partitioning=true, union_by_name=true)
+    """
+    if where_clauses:
+        query += f" WHERE {' AND '.join(where_clauses)}"
+
+    try:
+        con.execute(query)
+        count = con.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0]
+        if count == 0:
+            con.close()
+            return None, None
+        return con, view_name
+    except Exception as e:
+        if "No files found" in str(e) or "does not exist" in str(e):
             con.close()
             return None, None
         raise

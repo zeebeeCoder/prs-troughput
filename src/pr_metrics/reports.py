@@ -13,8 +13,10 @@ from .queries import (
     get_size_distribution, get_weekly_stats, get_author_weekly_stats,
     get_top_authors, get_monthly_stats,
     get_contributor_stats_for_repo, get_org_baseline_stats,
-    get_contributor_review_activity, get_contributor_weekly_trends
+    get_contributor_weekly_trends
 )
+from .processor import load_latest_data
+from .storage import load_hive_dataset
 
 
 def generate_rich_terminal_report(con, view_name="pr_data", org=None, repo=None, top_n_individual=5):
@@ -544,7 +546,6 @@ Generated: [dim]{datetime.now().strftime('%Y-%m-%d %H:%M')}[/dim]
     for _, contributor_row in top_contributors.iterrows():
         contributor = contributor_row['author']
         total_prs_contributor = int(contributor_row['pr_count'])
-        merged_prs_contributor = int(contributor_row['merged_count'])
         contributor_merge_rate = contributor_row['merge_rate']
 
         # Get weekly trends
@@ -654,3 +655,151 @@ Generated: [dim]{datetime.now().strftime('%Y-%m-%d %H:%M')}[/dim]
 
     console.print(Panel(health_text, title="🏥 Health Check", border_style="yellow"))
 
+
+
+def _safe_scalar(con, query, default=0):
+    """Run a scalar DuckDB query and return a default on empty/error."""
+    try:
+        row = con.execute(query).fetchone()
+        return row[0] if row and row[0] is not None else default
+    except Exception:
+        return default
+
+
+def generate_delivery_report(org=None, repo=None, days_back=14, output_dir="output", branch_active_days=30):
+    """Generate a combined PR + commit + branch delivery ledger report."""
+    console = Console()
+    repo_display = f" / {repo}" if repo else ""
+
+    pr_con = commits_con = branches_con = None
+    try:
+        pr_con, pr_view = load_latest_data(org, output_dir=output_dir, days_back=days_back, repo=repo)
+        commits_con, commits_view = load_hive_dataset(
+            f"{output_dir}/ledger/commits",
+            "commits",
+            org=org,
+            repo=repo,
+            days_back=days_back,
+            date_column="committed_at",
+        )
+        branches_con, branches_view = load_hive_dataset(
+            f"{output_dir}/ledger/branches",
+            "branches",
+            org=org,
+            repo=repo,
+            days_back=None,
+            date_column=None,
+        )
+
+        if commits_con:
+            commits_con.execute(f"""
+                CREATE OR REPLACE VIEW commits_latest AS
+                SELECT * EXCLUDE (rn)
+                FROM (
+                    SELECT *, ROW_NUMBER() OVER (PARTITION BY org, repo, sha ORDER BY collected_at DESC) AS rn
+                    FROM {commits_view}
+                )
+                WHERE rn = 1
+            """)
+            commits_view = "commits_latest"
+
+        if branches_con:
+            branches_con.execute(f"""
+                CREATE OR REPLACE VIEW branches_latest AS
+                SELECT * EXCLUDE (rn)
+                FROM (
+                    SELECT *, ROW_NUMBER() OVER (PARTITION BY org, repo, branch ORDER BY collected_at DESC) AS rn
+                    FROM {branches_view}
+                )
+                WHERE rn = 1
+            """)
+            branches_view = "branches_latest"
+
+        active_cutoff_expr = f"current_date - INTERVAL {int(branch_active_days)} DAY"
+        active_branch_filter = f"last_commit_at >= {active_cutoff_expr}"
+
+        merged_prs = _safe_scalar(pr_con, f"SELECT COUNT(*) FROM {pr_view} WHERE state = 'merged'") if pr_con else 0
+        open_prs = _safe_scalar(pr_con, f"SELECT COUNT(*) FROM {pr_view} WHERE state = 'open'") if pr_con else 0
+        total_prs = _safe_scalar(pr_con, f"SELECT COUNT(*) FROM {pr_view}") if pr_con else 0
+        direct_main = _safe_scalar(commits_con, f"SELECT COUNT(*) FROM {commits_view} WHERE is_direct_main") if commits_con else 0
+        total_commits = _safe_scalar(commits_con, f"SELECT COUNT(*) FROM {commits_view}") if commits_con else 0
+        active_invisible_wip = _safe_scalar(
+            branches_con,
+            f"SELECT COUNT(*) FROM {branches_view} WHERE COALESCE(ahead_main, 0) > 0 AND NOT has_open_pr AND {active_branch_filter}",
+        ) if branches_con else 0
+        active_branch_wip = _safe_scalar(
+            branches_con,
+            f"SELECT COUNT(*) FROM {branches_view} WHERE COALESCE(ahead_main, 0) > 0 AND {active_branch_filter}",
+        ) if branches_con else 0
+        stale_branch_wip = _safe_scalar(
+            branches_con,
+            f"SELECT COUNT(*) FROM {branches_view} WHERE COALESCE(ahead_main, 0) > 0 AND NOT ({active_branch_filter})",
+        ) if branches_con else 0
+
+        header = f"""[bold blue]Git Delivery Ledger{repo_display}[/bold blue]
+Generated: [dim]{datetime.now().strftime('%Y-%m-%d %H:%M')}[/dim]
+Window: [green]last {days_back} days[/green]
+Active branch window: [green]{branch_active_days} days[/green]
+
+PRs remain one delivery lane. Direct default-branch commits and active branch WIP are shown beside them."""
+        console.print(Panel(header, title="📦 Delivery Scope", border_style="blue"))
+
+        summary = Table(show_header=False, box=box.SIMPLE)
+        summary.add_column("Lane", style="cyan", width=24)
+        summary.add_column("Count", style="bold green", justify="right")
+        summary.add_column("Meaning", style="dim")
+        summary.add_row("Merged PRs", str(merged_prs), f"of {total_prs} PR rows collected")
+        summary.add_row("Open PRs", str(open_prs), "review queue / in-flight PR lane")
+        summary.add_row("Direct main commits", str(direct_main), f"of {total_commits} default-branch commits")
+        summary.add_row("Active Branch WIP", str(active_branch_wip), f"ahead branches touched in {branch_active_days}d")
+        summary.add_row("Active Invisible WIP", str(active_invisible_wip), "active ahead branches with no open PR")
+        summary.add_row("Stale Branch WIP", str(stale_branch_wip), "ahead branches outside active window")
+        console.print(Panel(summary, title="🎯 Combined Throughput", border_style="green"))
+
+        if commits_con:
+            activity_df = commits_con.execute(f"""
+                SELECT activity_class, COUNT(*) AS commits
+                FROM {commits_view}
+                GROUP BY activity_class
+                ORDER BY commits DESC
+                LIMIT 12
+            """).fetchdf()
+            activity = Table(box=box.ROUNDED)
+            activity.add_column("Activity", style="bold")
+            activity.add_column("Commits", justify="right", style="cyan")
+            for _, row in activity_df.iterrows():
+                activity.add_row(row['activity_class'] or 'unknown', str(int(row['commits'])))
+            console.print(Panel(activity, title="🧬 Semantic Activity Mix", border_style="cyan"))
+
+        if branches_con:
+            invisible_df = branches_con.execute(f"""
+                SELECT repo, branch, ahead_main, behind_main, last_author, last_commit_at
+                FROM {branches_view}
+                WHERE COALESCE(ahead_main, 0) > 0 AND NOT has_open_pr AND {active_branch_filter}
+                ORDER BY last_commit_at DESC, ahead_main DESC
+                LIMIT 15
+            """).fetchdf()
+            if not invisible_df.empty:
+                invisible = Table(box=box.ROUNDED)
+                invisible.add_column("Repo", style="bold")
+                invisible.add_column("Branch")
+                invisible.add_column("Ahead", justify="right", style="green")
+                invisible.add_column("Behind", justify="right", style="yellow")
+                invisible.add_column("Author", style="cyan")
+                invisible.add_column("Last commit", style="dim")
+                for _, row in invisible_df.iterrows():
+                    last_commit = pd.to_datetime(row['last_commit_at']).strftime('%Y-%m-%d') if pd.notna(row['last_commit_at']) else '—'
+                    invisible.add_row(
+                        row['repo'],
+                        row['branch'],
+                        str(int(row['ahead_main'] or 0)),
+                        str(int(row['behind_main'] or 0)),
+                        row['last_author'] or '—',
+                        last_commit,
+                    )
+                console.print(Panel(invisible, title="🫥 Active Invisible WIP", border_style="yellow"))
+
+    finally:
+        for con in (pr_con, commits_con, branches_con):
+            if con is not None:
+                con.close()

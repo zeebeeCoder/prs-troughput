@@ -166,3 +166,4 @@ output/
 *.csv
 *.json
 *.xlsx
+.gitnexus

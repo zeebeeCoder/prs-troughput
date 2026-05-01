@@ -11,6 +11,7 @@ A modern CLI tool for collecting and analyzing Pull Request metrics from GitHub 
 - 📈 **Weekly Trend Analysis** - Track contributor performance over time with historical comparisons
 - 📏 **Organization Baselines** - Compare individual/repo performance against org-wide averages
 - 💾 **Efficient Storage** - Hive-partitioned Parquet files with CSV exports for compatibility
+- 📦 **Git Delivery Ledger** - Optional commit and branch snapshots expose direct-to-main work and invisible WIP
 - ⚡ **Fast & Efficient** - Uses GitHub CLI (`gh`) for optimized API access
 
 ## Prerequisites
@@ -58,6 +59,23 @@ uv run pr-metrics --org your-org --repo backend-api --days 60 --report --termina
 
 # Full repository scan (slower, more complete)
 uv run pr-metrics --org your-org --full-scan --days 30
+
+# Collect PRs plus commit/branch ledger data for one or more repositories
+uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger
+uv run pr-metrics --org your-org --repo coto_joy,coto_backend --days 30 --include-ledger
+
+# Generate combined delivery report from collected PR/commit/branch data
+uv run pr-metrics --org your-org --repo backend-api --days 30 --delivery-report
+uv run pr-metrics --org your-org --repo backend-api --days 30 --delivery-report --branch-active-days 14
+
+# Run reusable DuckDB insight slices over the generated parquet lake
+uv run pr-metrics --list-insights
+uv run pr-metrics --org your-org --insight active_repos --days 90
+uv run pr-metrics --org your-org --repo backend-api --insight kinetics_weekly --days 30
+uv run pr-metrics --org your-org --repo backend-api --insight direct_main_risk --format json
+
+# Validate GitHub API parquet facts against a local clone without mutating it
+uv run pr-metrics --org your-org --repo backend-api --days 30 --validate-local ~/code/backend-api
 ```
 
 ### Command Line Options
@@ -65,13 +83,26 @@ uv run pr-metrics --org your-org --full-scan --days 30
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--org ORG` | (required*) | GitHub organization to analyze |
-| `--repo REPO` | None | Filter by specific repository (enables contributor report) |
+| `--repo REPO` | None | Filter by specific repository; collection accepts comma-separated names |
 | `--days DAYS` | 14 | Number of days back to analyze |
 | `--min-prs N` | 3 | Minimum PRs required to include repo |
 | `--full-scan` | False | Process all repos (slower) |
 | `--report` | False | Generate report from existing data |
 | `--terminal` | False | Rich terminal report with styling |
 | `--top-n N` | 5 | Top contributors in weekly breakdown |
+| `--include-ledger` | False | Collect commit and branch ledger datasets in addition to PRs |
+| `--include-commits` | False | Collect default-branch commit facts only |
+| `--include-branches` | False | Collect remote branch snapshots only |
+| `--commit-limit N` | 100 | Max default-branch commits to collect per repo |
+| `--branch-limit N` | 100 | Max branches to collect per repo |
+| `--skip-commit-files` | False | Skip per-file commit facts to reduce GitHub API work |
+| `--branch-active-days N` | 30 | Treat branches with commits in this many days as active WIP |
+| `--delivery-report` | False | Show combined merged PR + direct main commit + branch WIP report |
+| `--list-insights` | False | List reusable DuckDB insight slices |
+| `--insight NAME` | None | Run a named insight slice from existing parquet data |
+| `--format table/json/csv` | table | Output format for `--insight` and `--validate-local` |
+| `--validate-local PATH` | None | Compare existing parquet commit/branch facts against a local Git clone with read-only commands |
+| `--remote REMOTE` | origin | Remote-tracking namespace for `--validate-local` branch checks |
 
 \* Organization is required via `--org` flag or `PR_METRICS_ORG` environment variable
 
@@ -136,6 +167,42 @@ See [docs/CONTRIBUTOR_METRICS.md](docs/CONTRIBUTOR_METRICS.md) for detailed docu
 - Self-merge vs peer-review rates
 - Review responsiveness (time to first review)
 - Repository activity and health indicators
+
+### 📦 Git Delivery Ledger Metrics
+- PR raw fields for queue health: `updated_at`, `head_ref`, `head_sha`, review requests, CI status, mergeability
+- Default-branch commits with Conventional Commit parsing and activity classes
+- Direct-to-main commit lane separated from PR-linked squash/merge commits when detectable
+- Branch snapshots with ahead/behind counts and open-PR linkage
+- Active invisible WIP: branches ahead of default branch without an open PR, filtered by recent branch activity
+- Stale branch WIP bucket so old long-lived branches do not swamp the live queue
+
+### 🧠 DuckDB Insight Slices
+
+The CLI is primarily a data-refresh engine, but it also exposes reusable SQL-backed slices for agents and analysts. These operate on canonical `*_latest` DuckDB views over Hive-partitioned parquet.
+
+| Insight | Purpose |
+|---------|---------|
+| `active_repos` | Pick evaluation repos by recent PR intensity |
+| `intensity_weekly` | Weekly heatmap grain by repo, actor, and lane |
+| `kinetics_weekly` | Velocity and acceleration/deceleration signals by repo/week |
+| `review_queue` | Open PR queue buckets: review, author, CI, mergeability, stale |
+| `invisible_wip` | Branches ahead of default branch without open PRs |
+| `direct_main_risk` | Direct-main commits ranked by churn/sensitive/no-test risk |
+| `traceability` | Task/spec marker coverage across PRs, commits, and branches |
+| `activity_mix` | Semantic activity classes by repo |
+
+### 🔎 Local Accuracy Validation
+
+Use `--validate-local` when you have a local clone and want to compare GitHub API-derived parquet facts with Git's own view of the repository:
+
+```bash
+uv run pr-metrics --org Eve-World-Platform \
+  --repo coto-joy \
+  --days 30 \
+  --validate-local ~/code/coto/coto-joy
+```
+
+The validator intentionally runs only read-only commands (`git cat-file`, `git show --numstat`, `git rev-list`, `git rev-parse`). It does **not** fetch, checkout, reset, commit, or write into the target repo. If the local clone is stale, rows are reported as missing/not comparable instead of being corrected automatically.
 
 ## Output
 

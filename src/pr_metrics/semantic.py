@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import math
 import re
 from typing import Any, Iterable
@@ -443,6 +444,19 @@ def classify_semantic_units(
     ]
 
 
+def semantic_units_from_delivery_lake_rows(
+    pr_rows: Iterable[dict[str, Any]] = (),
+    commit_rows: Iterable[dict[str, Any]] = (),
+    branch_rows: Iterable[dict[str, Any]] = (),
+) -> list[SemanticUnit]:
+    """Build semantic units from PR, commit, and branch delivery-lake rows."""
+    units = []
+    units.extend(semantic_units_from_rows("pr", pr_rows))
+    units.extend(semantic_units_from_rows("commit", commit_rows))
+    units.extend(semantic_units_from_rows("branch", branch_rows))
+    return units
+
+
 def classify_delivery_lake_rows(
     pr_rows: Iterable[dict[str, Any]] = (),
     commit_rows: Iterable[dict[str, Any]] = (),
@@ -453,14 +467,52 @@ def classify_delivery_lake_rows(
     embedding_model: str = EMBEDDING_MODEL,
 ) -> list[dict[str, Any]]:
     """Classify PR, commit, and branch rows into semantic category facts."""
-    units = []
-    units.extend(semantic_units_from_rows("pr", pr_rows))
-    units.extend(semantic_units_from_rows("commit", commit_rows))
-    units.extend(semantic_units_from_rows("branch", branch_rows))
     return classify_semantic_units(
-        units,
+        semantic_units_from_delivery_lake_rows(pr_rows, commit_rows, branch_rows),
         semantic_mode=semantic_mode,
         embedding_client=embedding_client,
         embedding_threshold=embedding_threshold,
         embedding_model=embedding_model,
     )
+
+
+def _text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _embedding_row(unit: SemanticUnit, result: Any, embedding_model: str, embedded_at: pd.Timestamp) -> dict[str, Any]:
+    observed_at = unit.metadata.get("observed_at")
+    year, month = _timestamp_partition(observed_at or embedded_at)
+    embedding = result.embedding if result and result.embedding else None
+    return {
+        "org": unit.org,
+        "repo": unit.repo,
+        "year": year,
+        "month": month,
+        "unit_kind": unit.kind,
+        "unit_id": unit.unit_id,
+        "text_hash": _text_hash(unit.text),
+        "text": unit.text,
+        "embedding_model": embedding_model,
+        "embedding_dimensions": len(embedding) if embedding else None,
+        "embedding": embedding,
+        "embedded_at": embedded_at,
+        "observed_at": observed_at,
+        "tokens": getattr(result, "tokens", 0) if result else 0,
+        "error": getattr(result, "error", None) if result else "missing embedding result",
+    }
+
+
+def embed_semantic_units(
+    units: Iterable[SemanticUnit],
+    embedding_client: Any,
+    embedding_model: str,
+) -> list[dict[str, Any]]:
+    """Embed semantic unit envelopes into durable vector rows."""
+    unit_list = list(units)
+    embedded_at = pd.Timestamp(datetime.now(timezone.utc))
+    results = embedding_client.embed([unit.text for unit in unit_list]) if unit_list else []
+    return [
+        _embedding_row(unit, result, embedding_model, embedded_at)
+        for unit, result in zip(unit_list, results)
+    ]

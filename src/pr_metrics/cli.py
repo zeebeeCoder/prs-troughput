@@ -32,7 +32,7 @@ from .reports import (
     generate_markdown_report,
     generate_rich_terminal_report,
 )
-from .semantic import classify_delivery_lake_rows
+from .semantic import classify_delivery_lake_rows, embed_semantic_units, semantic_units_from_delivery_lake_rows
 from .storage import write_rows_to_hive, write_to_hive
 from .utils import resolve_org, sanitize_org_name
 from .validation import validate_local_repo
@@ -222,15 +222,24 @@ def _classify_semantics(args, org):
         days_back=args.days,
     )
     try:
+        pr_rows = _view_records(con, available, "prs_latest")
+        commit_rows = _view_records(con, available, "commits_latest")
+        branch_rows = _view_records(con, available, "branches_latest")
+        embedding_client = _embedding_client_from_args(args)
+        embedding_model = args.embedding_model if args.semantic_mode == "hybrid" else "none"
         rows = classify_delivery_lake_rows(
-            pr_rows=_view_records(con, available, "prs_latest"),
-            commit_rows=_view_records(con, available, "commits_latest"),
-            branch_rows=_view_records(con, available, "branches_latest"),
+            pr_rows=pr_rows,
+            commit_rows=commit_rows,
+            branch_rows=branch_rows,
             semantic_mode=args.semantic_mode,
-            embedding_client=_embedding_client_from_args(args),
+            embedding_client=embedding_client,
             embedding_threshold=args.embedding_threshold,
-            embedding_model=args.embedding_model if args.semantic_mode == "hybrid" else "none",
+            embedding_model=embedding_model,
         )
+        embedding_rows = []
+        if args.semantic_mode == "hybrid" and embedding_client is not None:
+            units = semantic_units_from_delivery_lake_rows(pr_rows=pr_rows, commit_rows=commit_rows, branch_rows=branch_rows)
+            embedding_rows = embed_semantic_units(units, embedding_client=embedding_client, embedding_model=embedding_model)
     finally:
         con.close()
 
@@ -239,6 +248,10 @@ def _classify_semantics(args, org):
     if args.semantic_mode == "hybrid" and source_counts.get("embedding", 0) == 0:
         print("⚠️  Hybrid semantic mode produced no embedding category facts; check Fireworks key/model access or lower --embedding-threshold")
     write_rows_to_hive(rows, f"{OUTPUT_DIR}/ledger/semantic_categories", table_name="semantic_categories")
+    if embedding_rows:
+        embedded_count = sum(1 for row in embedding_rows if row.get("embedding") is not None)
+        print(f"✓ Prepared {len(embedding_rows)} semantic embedding rows ({embedded_count} with vectors)")
+        write_rows_to_hive(embedding_rows, f"{OUTPUT_DIR}/ledger/semantic_embeddings", table_name="semantic_embeddings")
 
 
 def _collect_ledger(args, org, repos):

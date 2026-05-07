@@ -36,6 +36,9 @@ STRING_COLUMNS_BY_TABLE = {
         "org", "repo", "unit_kind", "unit_id", "category_namespace", "category",
         "confidence", "source", "evidence", "classifier_version", "taxonomy_version", "embedding_model",
     ),
+    "semantic_embeddings": (
+        "org", "repo", "unit_kind", "unit_id", "text_hash", "text", "embedding_model", "error",
+    ),
 }
 
 

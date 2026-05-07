@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from pr_metrics.semantic import TAXONOMY_ENTRIES, classify_delivery_lake_rows, classify_semantic_unit, semantic_unit_from_branch_row, semantic_unit_from_commit_row
+from pr_metrics.semantic import TAXONOMY_ENTRIES, classify_delivery_lake_rows, classify_semantic_unit, embed_semantic_units, semantic_unit_from_branch_row, semantic_unit_from_commit_row
 
 
 class FakeEmbeddingClient:
@@ -85,6 +85,27 @@ def test_hybrid_semantic_mode_adds_embedding_candidate_facts():
     assert ("commit", "abc123", "work_type", "refactor") in embedding_keys
     assert all(row["classifier_version"] == "embedding-sim-v1" for row in rows if row["source"] == "embedding")
     assert all(row["embedding_model"] == "nomic-ai/nomic-embed-text-v1.5" for row in rows if row["source"] == "embedding")
+
+
+def test_embed_semantic_units_persists_vector_rows():
+    unit = semantic_unit_from_commit_row({
+        "org": "Acme",
+        "repo": "backend",
+        "sha": "abc123",
+        "subject": "refactor: simplify service",
+        "committed_at": _ts("2026-04-02T00:00:00"),
+    })
+
+    rows = embed_semantic_units([unit], FakeEmbeddingClient(), "fake-embed")
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["unit_kind"] == "commit"
+    assert row["unit_id"] == "abc123"
+    assert row["embedding_model"] == "fake-embed"
+    assert row["embedding"] == [1.0, 0.0, 0.0]
+    assert row["embedding_dimensions"] == 3
+    assert len(row["text_hash"]) == 64
 
 
 def test_taxonomy_entries_have_embedding_text():

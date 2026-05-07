@@ -41,6 +41,20 @@ Hybrid mode embeds:
 
 It then computes cosine similarity in Python and persists candidate labels above `--embedding-threshold` into `semantic_categories`.
 
+Hybrid mode also persists raw unit vectors into:
+
+```text
+output/ledger/semantic_embeddings/
+```
+
+The durable embedding grain is:
+
+```text
+(org, repo, unit_kind, unit_id, text_hash, embedding_model)
+```
+
+Rows include the semantic envelope text, vector, dimensions, tokens, error, observed timestamp, and embedded timestamp.
+
 Embedding facts use:
 
 ```text
@@ -54,8 +68,31 @@ evidence="cosine=0.812; taxonomy=work_type/refactor"
 
 Deterministic rule labels are kept as the spine. Embedding labels are additive candidates and do not replace rule/propagated labels.
 
+## DuckDB vector queries
+
+Vectors are stored as DuckDB list values in parquet, so they can be queried directly with DuckDB's list similarity functions:
+
+```sql
+SELECT
+  unit_kind,
+  unit_id,
+  list_cosine_similarity(embedding, [1.0, 0.0, 0.0]) AS score,
+  text
+FROM semantic_embeddings_latest
+WHERE unit_kind = 'commit'
+  AND embedding IS NOT NULL
+ORDER BY score DESC
+LIMIT 20;
+```
+
+Use `semantic_embedding_coverage` to verify vector persistence and API errors:
+
+```bash
+uv run pr-metrics --org your-org --repo backend-api --insight semantic_embedding_coverage --days 30
+```
+
 ## Why no DuckDB vector extension yet
 
-For v1, Python computes similarity directly because the taxonomy is small and the goal is category enrichment, not vector search. DuckDB remains the parquet/query layer.
+For v1, Python computes taxonomy classification similarity directly because the taxonomy is small. Raw vectors are still persisted and queryable through DuckDB list functions.
 
-A later vector-search slice can add a `semantic_embeddings` dataset or DuckDB VSS index once we need nearest-neighbor search over many historical units.
+A later vector-search slice can add a DuckDB VSS index once we need indexed nearest-neighbor search over many historical units.

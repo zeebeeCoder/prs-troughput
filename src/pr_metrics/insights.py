@@ -761,6 +761,27 @@ INSIGHTS: dict[str, Insight] = {
             LIMIT 300
         """,
     ),
+    "semantic_embedding_coverage": Insight(
+        description="Coverage and error status for persisted semantic unit embeddings.",
+        required_views=("semantic_embeddings_latest",),
+        sql="""
+            SELECT
+                org,
+                repo,
+                unit_kind,
+                embedding_model,
+                COUNT(*) AS units,
+                COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS embedded_units,
+                COUNT(*) FILTER (WHERE error IS NOT NULL) AS errored_units,
+                ROUND(100.0 * COUNT(*) FILTER (WHERE embedding IS NOT NULL) / NULLIF(COUNT(*), 0), 1) AS embedded_pct,
+                MAX(embedded_at)::DATE AS latest_embedded_at,
+                MAX(embedding_dimensions) AS embedding_dimensions
+            FROM semantic_embeddings_latest
+            GROUP BY 1, 2, 3, 4
+            ORDER BY latest_embedded_at DESC, embedded_units DESC, units DESC
+            LIMIT 200
+        """,
+    ),
     "activity_mix": Insight(
         description="Semantic work mix by repo and activity class.",
         required_views=("commits_latest",),
@@ -915,6 +936,15 @@ DELIVERY_DATASETS = (
         "date_column": "observed_at",
         "partition_by": "org, repo, unit_kind, unit_id, category_namespace, category",
         "order_by": "COALESCE(classified_at, observed_at)",
+    },
+    {
+        "raw_view": "semantic_embeddings_raw",
+        "latest_view": "semantic_embeddings_latest",
+        "relative_dir": ("ledger", "semantic_embeddings"),
+        "days_back": "configured",
+        "date_column": "observed_at",
+        "partition_by": "org, repo, unit_kind, unit_id, text_hash, embedding_model",
+        "order_by": "COALESCE(embedded_at, observed_at)",
     },
 )
 
@@ -1116,6 +1146,29 @@ EMPTY_LATEST_VIEW_SQL = {
                 ''::VARCHAR AS embedding_model,
                 NULL::TIMESTAMP AS classified_at,
                 NULL::TIMESTAMP AS observed_at
+        )
+        WHERE false
+    """,
+    "semantic_embeddings_latest": """
+        CREATE OR REPLACE VIEW semantic_embeddings_latest AS
+        SELECT *
+        FROM (
+            SELECT
+                ''::VARCHAR AS org,
+                ''::VARCHAR AS repo,
+                NULL::INTEGER AS year,
+                NULL::INTEGER AS month,
+                ''::VARCHAR AS unit_kind,
+                ''::VARCHAR AS unit_id,
+                ''::VARCHAR AS text_hash,
+                ''::VARCHAR AS text,
+                ''::VARCHAR AS embedding_model,
+                NULL::INTEGER AS embedding_dimensions,
+                NULL::DOUBLE[] AS embedding,
+                NULL::TIMESTAMP AS embedded_at,
+                NULL::TIMESTAMP AS observed_at,
+                NULL::INTEGER AS tokens,
+                ''::VARCHAR AS error
         )
         WHERE false
     """,

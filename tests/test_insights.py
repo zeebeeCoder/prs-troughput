@@ -1,11 +1,74 @@
 from datetime import datetime, timezone
 
-from pr_metrics.insights import render_dataframe, run_insight
+from pr_metrics.insights import create_delivery_lake_views, render_dataframe, run_insight
 from pr_metrics.storage import write_rows_to_hive
 
 
 def _ts(value):
     return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
+
+
+def test_semantic_embedding_coverage_and_duckdb_similarity_query(tmp_path):
+    output = tmp_path / "output"
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "unit_kind": "commit",
+                "unit_id": "refactor-sha",
+                "text_hash": "h1",
+                "text": "refactor service boundaries",
+                "embedding_model": "fake-embed",
+                "embedding_dimensions": 3,
+                "embedding": [1.0, 0.0, 0.0],
+                "embedded_at": _ts("2026-04-03T00:00:00"),
+                "observed_at": _ts("2026-04-02T00:00:00"),
+                "tokens": 5,
+                "error": None,
+            },
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "unit_kind": "commit",
+                "unit_id": "feature-sha",
+                "text_hash": "h2",
+                "text": "add checkout feature",
+                "embedding_model": "fake-embed",
+                "embedding_dimensions": 3,
+                "embedding": [0.0, 1.0, 0.0],
+                "embedded_at": _ts("2026-04-03T00:00:00"),
+                "observed_at": _ts("2026-04-02T00:00:00"),
+                "tokens": 5,
+                "error": None,
+            },
+        ],
+        str(output / "ledger" / "semantic_embeddings"),
+        table_name="semantic_embeddings",
+    )
+
+    coverage = run_insight("semantic_embedding_coverage", output_dir=str(output), org="Acme", repo="backend", days_back=60)
+    assert coverage.iloc[0]["embedded_units"] == 2
+    assert coverage.iloc[0]["embedded_pct"] == 100.0
+
+    con, available = create_delivery_lake_views(output_dir=str(output), org="Acme", repo="backend", days_back=60)
+    try:
+        assert "semantic_embeddings_latest" in available
+        nearest = con.execute("""
+            SELECT unit_id, list_cosine_similarity(embedding, [1.0, 0.0, 0.0]) AS score
+            FROM semantic_embeddings_latest
+            WHERE unit_kind = 'commit'
+            ORDER BY score DESC
+        """).fetchdf()
+    finally:
+        con.close()
+
+    assert list(nearest["unit_id"]) == ["refactor-sha", "feature-sha"]
+    assert nearest.iloc[0]["score"] == 1.0
 
 
 def test_active_repos_uses_commit_branch_and_delivery_lake_without_prs(tmp_path):

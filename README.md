@@ -71,7 +71,7 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger \
 # Persist deterministic semantic category facts for collected PR/commit/branch rows
 uv run pr-metrics --org your-org --repo backend-api --days 30 --classify-semantics
 
-# Add Fireworks embedding-derived candidate labels on top of deterministic rules
+# Add Fireworks embedding-derived candidate labels and raw unit vectors on top of deterministic rules
 uv run pr-metrics --org your-org --repo backend-api --days 30 --classify-semantics --semantic-mode hybrid
 
 # Generate combined delivery report from collected PR/commit/branch data
@@ -201,7 +201,7 @@ See [docs/CONTRIBUTOR_METRICS.md](docs/CONTRIBUTOR_METRICS.md) for detailed docu
 - Active invisible WIP: branches ahead of default branch without an open PR, filtered by recent branch activity and semantic branch role
 - Stale branch WIP bucket so old long-lived branches do not swamp the live queue
 - `semantic_categories` facts for deterministic multi-label attribution across PR, commit, and branch units
-- Optional Fireworks embedding-derived semantic candidate facts in `--semantic-mode hybrid`
+- Optional Fireworks embedding-derived semantic candidate facts and `semantic_embeddings` unit vectors in `--semantic-mode hybrid`
 
 See [docs/LEDGER_GRAIN_CONTRACTS.md](docs/LEDGER_GRAIN_CONTRACTS.md) for the foundational ledger grain contracts and CI fixture approach. See [docs/SEMANTIC_CATEGORIES.md](docs/SEMANTIC_CATEGORIES.md) for the deterministic semantic category fact model, [docs/EMBEDDING_ENRICHMENT.md](docs/EMBEDDING_ENRICHMENT.md) for Fireworks embedding enrichment, [docs/TRACEABILITY_INSIGHTS.md](docs/TRACEABILITY_INSIGHTS.md) for unit-level traceability workflows, and [docs/REPO_ACTIVITY_COVERAGE.md](docs/REPO_ACTIVITY_COVERAGE.md) for local lake coverage semantics.
 
@@ -223,6 +223,7 @@ The CLI is primarily a data-refresh engine, but it also exposes reusable SQL-bac
 | `traceability_breakdown` | Traceability coverage by week, actor, unit kind, repo, and semantic group |
 | `activity_mix` | Semantic activity classes by repo |
 | `refactoring_activity` | Refactor-attributed commits, PRs, and branches by actor/week/repo |
+| `semantic_embedding_coverage` | Coverage and error status for persisted semantic unit embeddings |
 
 ### 🔎 Local Accuracy Validation
 

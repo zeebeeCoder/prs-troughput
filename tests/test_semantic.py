@@ -1,6 +1,19 @@
 from datetime import datetime, timezone
 
-from pr_metrics.semantic import classify_delivery_lake_rows, classify_semantic_unit, semantic_unit_from_branch_row, semantic_unit_from_commit_row
+from pr_metrics.semantic import TAXONOMY_ENTRIES, classify_delivery_lake_rows, classify_semantic_unit, semantic_unit_from_branch_row, semantic_unit_from_commit_row
+
+
+class FakeEmbeddingClient:
+    def embed(self, texts):
+        return [type("EmbeddingResult", (), {"embedding": self._vector(text)})() for text in texts]
+
+    def _vector(self, text):
+        lowered = text.lower()
+        refactor = "refactor" in lowered or "restructuring" in lowered or "simplification" in lowered or "simplify" in lowered
+        oracle = "oracle" in lowered or "daily card" in lowered
+        if refactor or oracle:
+            return [1.0 if refactor else 0.0, 1.0 if oracle else 0.0, 0.0]
+        return [0.0, 0.0, 1.0]
 
 
 def _ts(value):
@@ -46,6 +59,36 @@ def test_branch_roles_classify_environment_and_ticket_wip():
     assert ("traceability", "untraced") in qa_facts
     assert ("branch_role", "ticket_wip") in ticket_facts
     assert ("ticket", "DEV-123") in ticket_facts
+
+
+def test_hybrid_semantic_mode_adds_embedding_candidate_facts():
+    rows = classify_delivery_lake_rows(
+        commit_rows=[{
+            "org": "Acme",
+            "repo": "backend",
+            "sha": "abc123",
+            "subject": "simplify daily card oracle resolver",
+            "committed_at": _ts("2026-04-02T00:00:00"),
+        }],
+        semantic_mode="hybrid",
+        embedding_client=FakeEmbeddingClient(),
+        embedding_threshold=0.7,
+        embedding_model="nomic-ai/nomic-embed-text-v1.5",
+    )
+
+    embedding_keys = {
+        (row["unit_kind"], row["unit_id"], row["category_namespace"], row["category"])
+        for row in rows
+        if row["source"] == "embedding"
+    }
+
+    assert ("commit", "abc123", "work_type", "refactor") in embedding_keys
+    assert all(row["classifier_version"] == "embedding-sim-v1" for row in rows if row["source"] == "embedding")
+    assert all(row["embedding_model"] == "nomic-ai/nomic-embed-text-v1.5" for row in rows if row["source"] == "embedding")
+
+
+def test_taxonomy_entries_have_embedding_text():
+    assert any(entry.namespace == "work_type" and entry.category == "refactor" and "refactor" in entry.text for entry in TAXONOMY_ENTRIES)
 
 
 def test_classify_delivery_lake_rows_persists_normalized_fact_rows():

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import math
 import re
 from typing import Any, Iterable
 
@@ -13,7 +14,9 @@ from .parsers import is_generated_path, is_sensitive_path, is_test_path, parse_c
 
 TAXONOMY_VERSION = "semantic-taxonomy-v1"
 CLASSIFIER_VERSION = "deterministic-rules-v1"
+EMBEDDING_CLASSIFIER_VERSION = "embedding-sim-v1"
 EMBEDDING_MODEL = "none"
+DEFAULT_EMBEDDING_THRESHOLD = 0.72
 
 TICKET_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
 
@@ -81,6 +84,42 @@ class CategoryFact:
     confidence: str
     source: str
     evidence: str
+    classifier_version: str = CLASSIFIER_VERSION
+    taxonomy_version: str = TAXONOMY_VERSION
+    embedding_model: str = EMBEDDING_MODEL
+
+
+@dataclass(frozen=True)
+class TaxonomyEntry:
+    """Embedding-ready taxonomy category description."""
+
+    namespace: str
+    category: str
+    description: str
+    examples: tuple[str, ...] = ()
+
+    @property
+    def text(self) -> str:
+        examples = " ".join(self.examples)
+        return f"namespace={self.namespace} category={self.category}. {self.description} Examples: {examples}".strip()
+
+
+TAXONOMY_ENTRIES = (
+    TaxonomyEntry("work_type", "feature", "New user-visible or product capability work.", ("feat checkout flow", "add daily card endpoint")),
+    TaxonomyEntry("work_type", "bug_fix", "Fixes defects, regressions, leaks, or broken behavior.", ("fix token parsing", "repair streaming abort")),
+    TaxonomyEntry("work_type", "refactor", "Behavior-preserving restructuring, simplification, cleanup, or migration.", ("refactor service boundaries", "split large function", "retire old implementation")),
+    TaxonomyEntry("work_type", "docs", "Documentation, plans, READMEs, specs, or written design artifacts.", ("docs add architecture note", "write session plan")),
+    TaxonomyEntry("work_type", "test", "Tests, fixtures, regression coverage, or validation harnesses.", ("test scenario replay", "add regression fixture")),
+    TaxonomyEntry("work_type", "infra", "Infrastructure, deployment, CI, environment, build, or operations work.", ("deploy staging", "update workflow", "terraform module")),
+    TaxonomyEntry("work_type", "agent_tooling", "Agent, coding assistant, prompt, CLAUDE, AGENTS, or automation-tooling work.", ("update AGENTS.md", "add claude workflow")),
+    TaxonomyEntry("quality", "risky_change", "Large, cross-cutting, security-sensitive, or low-test change that may need review.", ("large auth rewrite", "many files no tests")),
+    TaxonomyEntry("component", "backend", "Server, API, service, worker, or backend domain code.", ("api handler", "service layer")),
+    TaxonomyEntry("component", "frontend", "Client, UI, web app, component, page, styling, or frontend state code.", ("React component", "client route")),
+    TaxonomyEntry("component", "data", "Data model, analytics, DuckDB, parquet, metrics, warehouse, or ledger work.", ("duckdb insight", "parquet schema")),
+    TaxonomyEntry("component", "infra", "Deployment, environment, CI/CD, container, cloud, or infrastructure area.", ("values-prod", "deployment branch", "GitHub action")),
+    TaxonomyEntry("component", "auth", "Authentication, authorization, token, permission, OAuth, or security identity area.", ("jwt token", "permission check")),
+    TaxonomyEntry("component", "oracle", "Oracle, astrology, card reading, daily card, or jyotish product domain.", ("oracle adapter", "daily card lunar overlay")),
+)
 
 
 def _string(value: Any) -> str:
@@ -278,6 +317,87 @@ def classify_semantic_unit(unit: SemanticUnit) -> list[CategoryFact]:
     return facts
 
 
+def _cosine(left: list[float], right: list[float]) -> float:
+    """Return cosine similarity for two embedding vectors."""
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    return dot / (left_norm * right_norm) if left_norm and right_norm else 0.0
+
+
+def _embedding_confidence(score: float) -> str:
+    if score >= 0.84:
+        return "high"
+    if score >= 0.76:
+        return "medium"
+    return "low"
+
+
+def _embedding_fact(entry: TaxonomyEntry, score: float, embedding_model: str) -> CategoryFact:
+    return CategoryFact(
+        category_namespace=entry.namespace,
+        category=entry.category,
+        score=round(score, 4),
+        confidence=_embedding_confidence(score),
+        source="embedding",
+        evidence=f"cosine={score:.3f}; taxonomy={entry.namespace}/{entry.category}",
+        classifier_version=EMBEDDING_CLASSIFIER_VERSION,
+        taxonomy_version=TAXONOMY_VERSION,
+        embedding_model=embedding_model,
+    )
+
+
+def _embedding_category_facts(
+    units: list[SemanticUnit],
+    embedding_client: Any,
+    threshold: float,
+    embedding_model: str,
+) -> dict[str, list[CategoryFact]]:
+    """Return embedding-derived category facts keyed by unit identity."""
+    taxonomy_texts = [entry.text for entry in TAXONOMY_ENTRIES]
+    unit_texts = [unit.text for unit in units]
+    taxonomy_results = embedding_client.embed(taxonomy_texts)
+    unit_results = embedding_client.embed(unit_texts)
+    taxonomy_vectors = [result.embedding for result in taxonomy_results]
+
+    facts_by_unit: dict[str, list[CategoryFact]] = {}
+    for unit, unit_result in zip(units, unit_results):
+        if not unit_result.embedding:
+            continue
+        unit_facts: list[CategoryFact] = []
+        for entry, taxonomy_vector in zip(TAXONOMY_ENTRIES, taxonomy_vectors):
+            if not taxonomy_vector:
+                continue
+            score = _cosine(unit_result.embedding, taxonomy_vector)
+            if score >= threshold:
+                _add_unique(unit_facts, _embedding_fact(entry, score, embedding_model))
+        facts_by_unit[f"{unit.kind}:{unit.unit_id}"] = unit_facts
+    return facts_by_unit
+
+
+def _semantic_facts(
+    units: list[SemanticUnit],
+    semantic_mode: str,
+    embedding_client: Any | None,
+    embedding_threshold: float,
+    embedding_model: str,
+) -> list[tuple[SemanticUnit, CategoryFact]]:
+    """Classify units with deterministic rules and optional embedding candidates."""
+    rule_enabled = semantic_mode in {"rules", "hybrid"}
+    embedding_enabled = semantic_mode == "hybrid" and embedding_client is not None
+    embedding_facts = _embedding_category_facts(units, embedding_client, embedding_threshold, embedding_model) if embedding_enabled else {}
+
+    rows: list[tuple[SemanticUnit, CategoryFact]] = []
+    for unit in units:
+        facts = classify_semantic_unit(unit) if rule_enabled else []
+        for fact in embedding_facts.get(f"{unit.kind}:{unit.unit_id}", []):
+            _add_unique(facts, fact)
+        rows.extend((unit, fact) for fact in facts)
+    return rows
+
+
 def _timestamp_partition(value: Any) -> tuple[int | None, int | None]:
     ts = pd.to_datetime(value) if value is not None and not pd.isna(value) else None
     return (ts.year, ts.month) if ts is not None else (None, None)
@@ -299,21 +419,27 @@ def _category_row(unit: SemanticUnit, fact: CategoryFact, classified_at: pd.Time
         "confidence": fact.confidence,
         "source": fact.source,
         "evidence": fact.evidence,
-        "classifier_version": CLASSIFIER_VERSION,
-        "taxonomy_version": TAXONOMY_VERSION,
-        "embedding_model": EMBEDDING_MODEL,
+        "classifier_version": fact.classifier_version,
+        "taxonomy_version": fact.taxonomy_version,
+        "embedding_model": fact.embedding_model,
         "classified_at": classified_at,
         "observed_at": observed_at,
     }
 
 
-def classify_semantic_units(units: Iterable[SemanticUnit]) -> list[dict[str, Any]]:
+def classify_semantic_units(
+    units: Iterable[SemanticUnit],
+    semantic_mode: str = "rules",
+    embedding_client: Any | None = None,
+    embedding_threshold: float = DEFAULT_EMBEDDING_THRESHOLD,
+    embedding_model: str = EMBEDDING_MODEL,
+) -> list[dict[str, Any]]:
     """Classify units into durable semantic category fact rows."""
+    unit_list = list(units)
     classified_at = pd.Timestamp(datetime.now(timezone.utc))
     return [
         _category_row(unit, fact, classified_at)
-        for unit in units
-        for fact in classify_semantic_unit(unit)
+        for unit, fact in _semantic_facts(unit_list, semantic_mode, embedding_client, embedding_threshold, embedding_model)
     ]
 
 
@@ -321,10 +447,20 @@ def classify_delivery_lake_rows(
     pr_rows: Iterable[dict[str, Any]] = (),
     commit_rows: Iterable[dict[str, Any]] = (),
     branch_rows: Iterable[dict[str, Any]] = (),
+    semantic_mode: str = "rules",
+    embedding_client: Any | None = None,
+    embedding_threshold: float = DEFAULT_EMBEDDING_THRESHOLD,
+    embedding_model: str = EMBEDDING_MODEL,
 ) -> list[dict[str, Any]]:
     """Classify PR, commit, and branch rows into semantic category facts."""
     units = []
     units.extend(semantic_units_from_rows("pr", pr_rows))
     units.extend(semantic_units_from_rows("commit", commit_rows))
     units.extend(semantic_units_from_rows("branch", branch_rows))
-    return classify_semantic_units(units)
+    return classify_semantic_units(
+        units,
+        semantic_mode=semantic_mode,
+        embedding_client=embedding_client,
+        embedding_threshold=embedding_threshold,
+        embedding_model=embedding_model,
+    )

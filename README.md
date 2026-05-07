@@ -71,6 +71,9 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger \
 # Persist deterministic semantic category facts for collected PR/commit/branch rows
 uv run pr-metrics --org your-org --repo backend-api --days 30 --classify-semantics
 
+# Add Fireworks embedding-derived candidate labels on top of deterministic rules
+uv run pr-metrics --org your-org --repo backend-api --days 30 --classify-semantics --semantic-mode hybrid
+
 # Generate combined delivery report from collected PR/commit/branch data
 uv run pr-metrics --org your-org --repo backend-api --days 30 --delivery-report
 uv run pr-metrics --org your-org --repo backend-api --days 30 --delivery-report --branch-active-days 14
@@ -108,7 +111,14 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --validate-local ~
 | `--branch-limit N` | 100 | Max branches to collect per repo |
 | `--branch-commit-limit N` | 100 | Max ahead commits to collect per branch |
 | `--skip-commit-files` | False | Skip per-file commit facts to reduce GitHub API work |
-| `--classify-semantics` | False | Persist deterministic semantic category facts for collected PR/commit/branch rows |
+| `--classify-semantics` | False | Persist semantic category facts for collected PR/commit/branch rows |
+| `--semantic-mode rules/hybrid` | rules | Use deterministic rules only, or rules plus embedding-derived candidates |
+| `--embedding-provider fireworks` | fireworks | Embedding provider for hybrid semantic mode |
+| `--embedding-model MODEL` | `nomic-ai/nomic-embed-text-v1.5` | Fireworks embedding model |
+| `--embedding-dimensions N` | 768 | Fireworks embedding dimensions |
+| `--embedding-threshold N` | 0.72 | Cosine threshold for embedding candidate labels |
+| `--embedding-batch-size N` | 32 | Embedding API batch size |
+| `--embedding-config PATH` | `~/.config/semantic-cli/config.json` fallback | Optional config with `fireworks_api_key`; env `FIREWORKS_API_KEY` wins |
 | `--branch-active-days N` | 30 | Treat branches with commits in this many days as active WIP |
 | `--delivery-report` | False | Show combined merged PR + direct main commit + branch WIP report |
 | `--list-insights` | False | List reusable DuckDB insight slices |
@@ -191,8 +201,9 @@ See [docs/CONTRIBUTOR_METRICS.md](docs/CONTRIBUTOR_METRICS.md) for detailed docu
 - Active invisible WIP: branches ahead of default branch without an open PR, filtered by recent branch activity and semantic branch role
 - Stale branch WIP bucket so old long-lived branches do not swamp the live queue
 - `semantic_categories` facts for deterministic multi-label attribution across PR, commit, and branch units
+- Optional Fireworks embedding-derived semantic candidate facts in `--semantic-mode hybrid`
 
-See [docs/LEDGER_GRAIN_CONTRACTS.md](docs/LEDGER_GRAIN_CONTRACTS.md) for the foundational ledger grain contracts and CI fixture approach. See [docs/SEMANTIC_CATEGORIES.md](docs/SEMANTIC_CATEGORIES.md) for the deterministic semantic category fact model, [docs/TRACEABILITY_INSIGHTS.md](docs/TRACEABILITY_INSIGHTS.md) for unit-level traceability workflows, and [docs/REPO_ACTIVITY_COVERAGE.md](docs/REPO_ACTIVITY_COVERAGE.md) for local lake coverage semantics.
+See [docs/LEDGER_GRAIN_CONTRACTS.md](docs/LEDGER_GRAIN_CONTRACTS.md) for the foundational ledger grain contracts and CI fixture approach. See [docs/SEMANTIC_CATEGORIES.md](docs/SEMANTIC_CATEGORIES.md) for the deterministic semantic category fact model, [docs/EMBEDDING_ENRICHMENT.md](docs/EMBEDDING_ENRICHMENT.md) for Fireworks embedding enrichment, [docs/TRACEABILITY_INSIGHTS.md](docs/TRACEABILITY_INSIGHTS.md) for unit-level traceability workflows, and [docs/REPO_ACTIVITY_COVERAGE.md](docs/REPO_ACTIVITY_COVERAGE.md) for local lake coverage semantics.
 
 ### 🧠 DuckDB Insight Slices
 

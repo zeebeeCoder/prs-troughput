@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from .embeddings import DEFAULT_FIREWORKS_DIMENSIONS, DEFAULT_FIREWORKS_MODEL, create_fireworks_embedding_client
 from .github import (
     get_active_repos_from_search,
     get_org_repos,
@@ -195,6 +196,23 @@ def _view_records(con, available, view_name):
     return con.execute(f"SELECT * FROM {view_name}").fetchdf().to_dict("records")
 
 
+def _embedding_client_from_args(args):
+    """Create optional embedding client for hybrid semantic mode."""
+    if args.semantic_mode != "hybrid":
+        return None
+    if args.embedding_provider != "fireworks":
+        raise ValueError(f"Unsupported embedding provider: {args.embedding_provider}")
+    client = create_fireworks_embedding_client(
+        config_path=args.embedding_config,
+        model=args.embedding_model,
+        dimensions=args.embedding_dimensions,
+        batch_size=args.embedding_batch_size,
+    )
+    if client is None:
+        print("⚠️  No Fireworks API key found; semantic hybrid mode will persist rule-based facts only")
+    return client
+
+
 def _classify_semantics(args, org):
     """Classify available PR, commit, and branch rows into semantic category facts."""
     con, available = create_delivery_lake_views(
@@ -208,10 +226,18 @@ def _classify_semantics(args, org):
             pr_rows=_view_records(con, available, "prs_latest"),
             commit_rows=_view_records(con, available, "commits_latest"),
             branch_rows=_view_records(con, available, "branches_latest"),
+            semantic_mode=args.semantic_mode,
+            embedding_client=_embedding_client_from_args(args),
+            embedding_threshold=args.embedding_threshold,
+            embedding_model=args.embedding_model if args.semantic_mode == "hybrid" else "none",
         )
     finally:
         con.close()
 
+    source_counts = pd.Series([row.get("source") for row in rows]).value_counts().to_dict() if rows else {}
+    print(f"✓ Prepared {len(rows)} semantic category rows by source: {source_counts}")
+    if args.semantic_mode == "hybrid" and source_counts.get("embedding", 0) == 0:
+        print("⚠️  Hybrid semantic mode produced no embedding category facts; check Fireworks key/model access or lower --embedding-threshold")
     write_rows_to_hive(rows, f"{OUTPUT_DIR}/ledger/semantic_categories", table_name="semantic_categories")
 
 
@@ -256,7 +282,14 @@ def _build_parser():
     parser.add_argument('--branch-commit-limit', type=int, default=100, help='Max ahead commits to collect per branch (default: 100)')
     parser.add_argument('--branch-active-days', type=int, default=30, help='Treat branches with commits in this many days as active WIP (default: 30)')
     parser.add_argument('--skip-commit-files', action='store_true', help='Skip per-file commit facts to reduce GitHub API work')
-    parser.add_argument('--classify-semantics', action='store_true', help='Persist deterministic semantic category facts for collected PR/commit/branch rows')
+    parser.add_argument('--classify-semantics', action='store_true', help='Persist semantic category facts for collected PR/commit/branch rows')
+    parser.add_argument('--semantic-mode', choices=('rules', 'hybrid'), default='rules', help='Semantic classifier mode: rules only or rules plus embedding candidates (default: rules)')
+    parser.add_argument('--embedding-provider', choices=('fireworks',), default='fireworks', help='Embedding provider for semantic hybrid mode (default: fireworks)')
+    parser.add_argument('--embedding-model', default=DEFAULT_FIREWORKS_MODEL, help=f'Embedding model for semantic hybrid mode (default: {DEFAULT_FIREWORKS_MODEL})')
+    parser.add_argument('--embedding-dimensions', type=int, default=DEFAULT_FIREWORKS_DIMENSIONS, help=f'Embedding dimensions for semantic hybrid mode (default: {DEFAULT_FIREWORKS_DIMENSIONS})')
+    parser.add_argument('--embedding-threshold', type=float, default=0.72, help='Cosine threshold for embedding semantic candidates (default: 0.72)')
+    parser.add_argument('--embedding-batch-size', type=int, default=32, help='Embedding API batch size for semantic hybrid mode (default: 32)')
+    parser.add_argument('--embedding-config', default=None, help='Optional semantic-cli config path containing fireworks_api_key')
     parser.add_argument('--list-insights', action='store_true', help='List reusable DuckDB insight slices')
     parser.add_argument('--insight', type=str, help='Run a named insight slice from existing parquet data')
     parser.add_argument('--format', choices=('table', 'json', 'csv'), default='table', help='Output format for --insight (default: table)')

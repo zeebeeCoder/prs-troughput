@@ -126,6 +126,9 @@ class FireworksEmbeddingClient:
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
+                "Accept": "application/json",
+                # Fireworks sits behind Cloudflare; Python's default urllib UA can be rejected.
+                "User-Agent": "pr-metrics/0.1 (+https://github.com/zeebeeCoder/prs-troughput)",
             },
             method="POST",
         )

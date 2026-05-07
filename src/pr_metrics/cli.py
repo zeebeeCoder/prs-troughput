@@ -300,7 +300,7 @@ def _build_parser():
     parser.add_argument('--embedding-provider', choices=('fireworks',), default='fireworks', help='Embedding provider for semantic hybrid mode (default: fireworks)')
     parser.add_argument('--embedding-model', default=DEFAULT_FIREWORKS_MODEL, help=f'Embedding model for semantic hybrid mode (default: {DEFAULT_FIREWORKS_MODEL})')
     parser.add_argument('--embedding-dimensions', type=int, default=DEFAULT_FIREWORKS_DIMENSIONS, help=f'Embedding dimensions for semantic hybrid mode (default: {DEFAULT_FIREWORKS_DIMENSIONS})')
-    parser.add_argument('--embedding-threshold', type=float, default=0.72, help='Cosine threshold for embedding semantic candidates (default: 0.72)')
+    parser.add_argument('--embedding-threshold', type=float, default=0.55, help='Cosine threshold for embedding semantic candidates (default: 0.55)')
     parser.add_argument('--embedding-batch-size', type=int, default=32, help='Embedding API batch size for semantic hybrid mode (default: 32)')
     parser.add_argument('--embedding-config', default=None, help='Optional semantic-cli config path containing fireworks_api_key')
     parser.add_argument('--list-insights', action='store_true', help='List reusable DuckDB insight slices')

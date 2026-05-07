@@ -17,7 +17,7 @@ TAXONOMY_VERSION = "semantic-taxonomy-v1"
 CLASSIFIER_VERSION = "deterministic-rules-v1"
 EMBEDDING_CLASSIFIER_VERSION = "embedding-sim-v1"
 EMBEDDING_MODEL = "none"
-DEFAULT_EMBEDDING_THRESHOLD = 0.72
+DEFAULT_EMBEDDING_THRESHOLD = 0.55
 
 TICKET_RE = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
 

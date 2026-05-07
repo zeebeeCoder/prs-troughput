@@ -116,7 +116,7 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --validate-local ~
 | `--embedding-provider fireworks` | fireworks | Embedding provider for hybrid semantic mode |
 | `--embedding-model MODEL` | `nomic-ai/nomic-embed-text-v1.5` | Fireworks embedding model |
 | `--embedding-dimensions N` | 768 | Fireworks embedding dimensions |
-| `--embedding-threshold N` | 0.72 | Cosine threshold for embedding candidate labels |
+| `--embedding-threshold N` | 0.55 | Cosine threshold for embedding candidate labels |
 | `--embedding-batch-size N` | 32 | Embedding API batch size |
 | `--embedding-config PATH` | `~/.config/semantic-cli/config.json` fallback | Optional config with `fireworks_api_key`; env `FIREWORKS_API_KEY` wins |
 | `--branch-active-days N` | 30 | Treat branches with commits in this many days as active WIP |

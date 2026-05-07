@@ -78,6 +78,7 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --delivery-report 
 # Run reusable DuckDB insight slices over the generated parquet lake
 uv run pr-metrics --list-insights
 uv run pr-metrics --org your-org --insight active_repos --days 90
+uv run pr-metrics --org your-org --insight repo_lake_coverage --days 90
 uv run pr-metrics --org your-org --repo backend-api --insight kinetics_weekly --days 30
 uv run pr-metrics --org your-org --repo backend-api --insight direct_main_risk --format json
 uv run pr-metrics --org your-org --repo backend-api --insight untraced_units --format csv
@@ -191,7 +192,7 @@ See [docs/CONTRIBUTOR_METRICS.md](docs/CONTRIBUTOR_METRICS.md) for detailed docu
 - Stale branch WIP bucket so old long-lived branches do not swamp the live queue
 - `semantic_categories` facts for deterministic multi-label attribution across PR, commit, and branch units
 
-See [docs/LEDGER_GRAIN_CONTRACTS.md](docs/LEDGER_GRAIN_CONTRACTS.md) for the foundational ledger grain contracts and CI fixture approach. See [docs/SEMANTIC_CATEGORIES.md](docs/SEMANTIC_CATEGORIES.md) for the deterministic semantic category fact model and [docs/TRACEABILITY_INSIGHTS.md](docs/TRACEABILITY_INSIGHTS.md) for unit-level traceability workflows.
+See [docs/LEDGER_GRAIN_CONTRACTS.md](docs/LEDGER_GRAIN_CONTRACTS.md) for the foundational ledger grain contracts and CI fixture approach. See [docs/SEMANTIC_CATEGORIES.md](docs/SEMANTIC_CATEGORIES.md) for the deterministic semantic category fact model, [docs/TRACEABILITY_INSIGHTS.md](docs/TRACEABILITY_INSIGHTS.md) for unit-level traceability workflows, and [docs/REPO_ACTIVITY_COVERAGE.md](docs/REPO_ACTIVITY_COVERAGE.md) for local lake coverage semantics.
 
 ### 🧠 DuckDB Insight Slices
 
@@ -199,7 +200,8 @@ The CLI is primarily a data-refresh engine, but it also exposes reusable SQL-bac
 
 | Insight | Purpose |
 |---------|---------|
-| `active_repos` | Pick evaluation repos by recent PR intensity |
+| `active_repos` | Pick evaluation repos by local PR, commit, delivery, and branch activity |
+| `repo_lake_coverage` | Show which repos have local PR, commit, branch, delivery, and semantic parquet coverage |
 | `intensity_weekly` | Weekly heatmap grain by repo, actor, and lane |
 | `kinetics_weekly` | Velocity and acceleration/deceleration signals by repo/week |
 | `review_queue` | Open PR queue buckets: review, author, CI, mergeability, stale |

@@ -21,22 +21,170 @@ class Insight:
 
 INSIGHTS: dict[str, Insight] = {
     "active_repos": Insight(
-        description="Rank repositories by recent PR intensity for evaluation-contract selection.",
-        required_views=("prs_latest",),
+        description="Rank repositories by local delivery-lake activity across PR, commit, delivery, and branch grains.",
+        required_views=(),
         sql="""
+            WITH activity_events AS (
+                SELECT
+                    org,
+                    repo,
+                    'prs' AS source,
+                    COALESCE(updated_at, created_at) AS activity_at,
+                    1 AS pr_events,
+                    0 AS commit_events,
+                    0 AS delivery_events,
+                    0 AS active_branches,
+                    COALESCE(pr_size, 0) AS churn
+                FROM prs_latest
+                WHERE COALESCE(updated_at, created_at) IS NOT NULL
+
+                UNION ALL
+
+                SELECT
+                    org,
+                    repo,
+                    'commits' AS source,
+                    committed_at AS activity_at,
+                    0 AS pr_events,
+                    1 AS commit_events,
+                    0 AS delivery_events,
+                    0 AS active_branches,
+                    COALESCE(additions, 0) + COALESCE(deletions, 0) AS churn
+                FROM commits_latest
+                WHERE committed_at IS NOT NULL
+
+                UNION ALL
+
+                SELECT
+                    org,
+                    repo,
+                    'delivery_events' AS source,
+                    delivered_at AS activity_at,
+                    0 AS pr_events,
+                    0 AS commit_events,
+                    1 AS delivery_events,
+                    0 AS active_branches,
+                    0 AS churn
+                FROM delivery_events_latest
+                WHERE delivered_at IS NOT NULL
+
+                UNION ALL
+
+                SELECT
+                    org,
+                    repo,
+                    'branches' AS source,
+                    last_commit_at AS activity_at,
+                    0 AS pr_events,
+                    0 AS commit_events,
+                    0 AS delivery_events,
+                    CASE WHEN COALESCE(ahead_main, 0) > 0 THEN 1 ELSE 0 END AS active_branches,
+                    COALESCE(ahead_main, 0) AS churn
+                FROM branches_latest
+                WHERE last_commit_at IS NOT NULL
+            ),
+            repo_activity AS (
+                SELECT
+                    org,
+                    repo,
+                    SUM(pr_events) AS pr_events,
+                    SUM(commit_events) AS commit_events,
+                    SUM(delivery_events) AS delivery_events,
+                    SUM(active_branches) AS active_branches,
+                    SUM(churn) AS activity_churn,
+                    COUNT(DISTINCT source) AS source_count,
+                    string_agg(DISTINCT source, ',') AS activity_sources,
+                    MAX(activity_at)::DATE AS latest_activity
+                FROM activity_events
+                GROUP BY 1, 2
+            )
             SELECT
                 org,
                 repo,
-                COUNT(*) AS prs,
-                COUNT(*) FILTER (WHERE state = 'merged') AS merged_prs,
-                COUNT(*) FILTER (WHERE state = 'open') AS open_prs,
-                COUNT(DISTINCT author) AS authors,
-                SUM(COALESCE(pr_size, 0)) AS pr_churn,
-                MAX(created_at)::DATE AS latest_pr
-            FROM prs_latest
-            GROUP BY org, repo
-            ORDER BY prs DESC, latest_pr DESC
+                pr_events,
+                commit_events,
+                delivery_events,
+                active_branches,
+                activity_churn,
+                latest_activity,
+                activity_sources,
+                CASE
+                    WHEN source_count > 1 THEN 'multi_source_lake'
+                    WHEN activity_sources = 'prs' THEN 'pr_only_lake'
+                    ELSE 'single_source_lake'
+                END AS local_lake_status
+            FROM repo_activity
+            ORDER BY latest_activity DESC, activity_churn DESC, pr_events DESC, commit_events DESC
             LIMIT 25
+        """,
+    ),
+    "repo_lake_coverage": Insight(
+        description="Show which repositories have local PR, commit, branch, delivery, and semantic parquet coverage.",
+        required_views=(),
+        sql="""
+            WITH repos AS (
+                SELECT org, repo FROM prs_latest
+                UNION
+                SELECT org, repo FROM commits_latest
+                UNION
+                SELECT org, repo FROM branches_latest
+                UNION
+                SELECT org, repo FROM delivery_events_latest
+                UNION
+                SELECT org, repo FROM semantic_categories_latest
+            ),
+            pr_coverage AS (
+                SELECT org, repo, COUNT(*) AS pr_rows, MAX(COALESCE(updated_at, created_at))::DATE AS latest_pr
+                FROM prs_latest
+                GROUP BY 1, 2
+            ),
+            commit_coverage AS (
+                SELECT org, repo, COUNT(*) AS commit_rows, MAX(committed_at)::DATE AS latest_commit
+                FROM commits_latest
+                GROUP BY 1, 2
+            ),
+            branch_coverage AS (
+                SELECT org, repo, COUNT(*) AS branch_rows, MAX(last_commit_at)::DATE AS latest_branch
+                FROM branches_latest
+                GROUP BY 1, 2
+            ),
+            delivery_coverage AS (
+                SELECT org, repo, COUNT(*) AS delivery_rows, MAX(delivered_at)::DATE AS latest_delivery
+                FROM delivery_events_latest
+                GROUP BY 1, 2
+            ),
+            semantic_coverage AS (
+                SELECT org, repo, COUNT(*) AS semantic_rows, MAX(classified_at)::DATE AS latest_semantic_classification
+                FROM semantic_categories_latest
+                GROUP BY 1, 2
+            )
+            SELECT
+                r.org,
+                r.repo,
+                COALESCE(p.pr_rows, 0) > 0 AS has_pr_data,
+                COALESCE(c.commit_rows, 0) > 0 AS has_commit_data,
+                COALESCE(b.branch_rows, 0) > 0 AS has_branch_data,
+                COALESCE(d.delivery_rows, 0) > 0 AS has_delivery_data,
+                COALESCE(s.semantic_rows, 0) > 0 AS has_semantic_data,
+                COALESCE(p.pr_rows, 0) AS pr_rows,
+                COALESCE(c.commit_rows, 0) AS commit_rows,
+                COALESCE(b.branch_rows, 0) AS branch_rows,
+                COALESCE(d.delivery_rows, 0) AS delivery_rows,
+                COALESCE(s.semantic_rows, 0) AS semantic_rows,
+                p.latest_pr,
+                c.latest_commit,
+                b.latest_branch,
+                d.latest_delivery,
+                s.latest_semantic_classification,
+                GREATEST(p.latest_pr, c.latest_commit, b.latest_branch, d.latest_delivery, s.latest_semantic_classification) AS latest_local_fact
+            FROM repos r
+            LEFT JOIN pr_coverage p USING (org, repo)
+            LEFT JOIN commit_coverage c USING (org, repo)
+            LEFT JOIN branch_coverage b USING (org, repo)
+            LEFT JOIN delivery_coverage d USING (org, repo)
+            LEFT JOIN semantic_coverage s USING (org, repo)
+            ORDER BY latest_local_fact DESC NULLS LAST, commit_rows DESC, pr_rows DESC, branch_rows DESC
+            LIMIT 200
         """,
     ),
     "intensity_weekly": Insight(
@@ -865,11 +1013,88 @@ def _create_legacy_delivery_events_view(con, available: set[str]) -> None:
     available.add("delivery_events_latest")
 
 
-def _create_empty_semantic_categories_view(con, available: set[str]) -> None:
-    """Create an empty semantic view so branch insights can use optional categories."""
-    if "semantic_categories_latest" in available:
-        return
-    con.execute("""
+EMPTY_LATEST_VIEW_SQL = {
+    "prs_latest": """
+        CREATE OR REPLACE VIEW prs_latest AS
+        SELECT *
+        FROM (
+            SELECT
+                ''::VARCHAR AS org,
+                ''::VARCHAR AS repo,
+                NULL::INTEGER AS pr_number,
+                ''::VARCHAR AS author,
+                ''::VARCHAR AS title,
+                ''::VARCHAR AS url,
+                NULL::TIMESTAMP AS created_at,
+                NULL::TIMESTAMP AS updated_at,
+                NULL::TIMESTAMP AS merged_at,
+                ''::VARCHAR AS state,
+                NULL::INTEGER AS pr_size,
+                NULL::INTEGER AS changed_files,
+                ''::VARCHAR AS head_sha,
+                ''::VARCHAR AS task_id,
+                ''::VARCHAR AS spec_name
+        )
+        WHERE false
+    """,
+    "commits_latest": """
+        CREATE OR REPLACE VIEW commits_latest AS
+        SELECT *
+        FROM (
+            SELECT
+                ''::VARCHAR AS org,
+                ''::VARCHAR AS repo,
+                ''::VARCHAR AS sha,
+                ''::VARCHAR AS author_name,
+                ''::VARCHAR AS author_email,
+                NULL::TIMESTAMP AS authored_at,
+                NULL::TIMESTAMP AS committed_at,
+                ''::VARCHAR AS subject,
+                NULL::INTEGER AS additions,
+                NULL::INTEGER AS deletions,
+                NULL::INTEGER AS changed_files,
+                false AS is_direct_main,
+                ''::VARCHAR AS source_kinds,
+                ''::VARCHAR AS task_id,
+                ''::VARCHAR AS spec_name
+        )
+        WHERE false
+    """,
+    "branches_latest": """
+        CREATE OR REPLACE VIEW branches_latest AS
+        SELECT *
+        FROM (
+            SELECT
+                ''::VARCHAR AS org,
+                ''::VARCHAR AS repo,
+                ''::VARCHAR AS branch,
+                ''::VARCHAR AS head_sha,
+                NULL::TIMESTAMP AS last_commit_at,
+                ''::VARCHAR AS last_author,
+                NULL::INTEGER AS ahead_main,
+                NULL::INTEGER AS behind_main,
+                false AS has_open_pr,
+                ''::VARCHAR AS pr_url,
+                ''::VARCHAR AS task_id,
+                ''::VARCHAR AS spec_name
+        )
+        WHERE false
+    """,
+    "delivery_events_latest": """
+        CREATE OR REPLACE VIEW delivery_events_latest AS
+        SELECT *
+        FROM (
+            SELECT
+                ''::VARCHAR AS org,
+                ''::VARCHAR AS repo,
+                ''::VARCHAR AS delivery_sha,
+                NULL::TIMESTAMP AS delivered_at,
+                ''::VARCHAR AS delivery_mode,
+                NULL::INTEGER AS pr_number
+        )
+        WHERE false
+    """,
+    "semantic_categories_latest": """
         CREATE OR REPLACE VIEW semantic_categories_latest AS
         SELECT *
         FROM (
@@ -893,7 +1118,15 @@ def _create_empty_semantic_categories_view(con, available: set[str]) -> None:
                 NULL::TIMESTAMP AS observed_at
         )
         WHERE false
-    """)
+    """,
+}
+
+
+def _create_empty_optional_views(con, available: set[str]) -> None:
+    """Create empty fallback views for optional cross-grain insights without marking datasets available."""
+    for view_name, sql in EMPTY_LATEST_VIEW_SQL.items():
+        if view_name not in available:
+            con.execute(sql)
 
 
 def _apply_compatibility_views(con, available: set[str]) -> None:
@@ -906,7 +1139,7 @@ def _apply_compatibility_views(con, available: set[str]) -> None:
             "parent_count": "NULL::INTEGER",
         })
     _create_legacy_delivery_events_view(con, available)
-    _create_empty_semantic_categories_view(con, available)
+    _create_empty_optional_views(con, available)
 
 
 def create_delivery_lake_views(

@@ -8,6 +8,113 @@ def _ts(value):
     return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
 
 
+def test_active_repos_uses_commit_branch_and_delivery_lake_without_prs(tmp_path):
+    output = tmp_path / "output"
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "collected_at": _ts("2026-04-03T00:00:00"),
+                "sha": "abc123",
+                "author_name": "Dev",
+                "author_email": "dev@example.test",
+                "committed_at": _ts("2026-04-02T00:00:00"),
+                "source_kinds": "default_branch",
+                "is_direct_main": True,
+                "additions": 5,
+                "deletions": 2,
+            }
+        ],
+        str(output / "ledger" / "commits"),
+        table_name="commits",
+    )
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "collected_at": _ts("2026-04-03T00:00:00"),
+                "branch": "DEV-1/feature",
+                "head_sha": "def456",
+                "last_commit_at": _ts("2026-04-03T00:00:00"),
+                "last_author": "Dev",
+                "ahead_main": 2,
+                "behind_main": 0,
+                "has_open_pr": False,
+            }
+        ],
+        str(output / "ledger" / "branches"),
+        table_name="branches",
+    )
+
+    df = run_insight("active_repos", output_dir=str(output), org="Acme", repo="backend", days_back=60)
+
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["repo"] == "backend"
+    assert row["pr_events"] == 0
+    assert row["commit_events"] == 1
+    assert row["delivery_events"] == 1
+    assert row["active_branches"] == 1
+    assert row["local_lake_status"] == "multi_source_lake"
+    assert "commits" in row["activity_sources"]
+    assert "branches" in row["activity_sources"]
+
+
+def test_repo_lake_coverage_exposes_missing_dataset_shapes(tmp_path):
+    output = tmp_path / "output"
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "collected_at": _ts("2026-04-03T00:00:00"),
+                "pr_number": 1,
+                "author": "dev",
+                "created_at": _ts("2026-04-01T00:00:00"),
+                "updated_at": _ts("2026-04-02T00:00:00"),
+                "state": "open",
+                "pr_size": 10,
+            }
+        ],
+        str(output / "data"),
+        table_name="pr_data",
+    )
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "ledger-only",
+                "year": 2026,
+                "month": 4,
+                "collected_at": _ts("2026-04-03T00:00:00"),
+                "sha": "abc123",
+                "author_email": "dev@example.test",
+                "committed_at": _ts("2026-04-02T00:00:00"),
+                "source_kinds": "default_branch",
+                "is_direct_main": True,
+            }
+        ],
+        str(output / "ledger" / "commits"),
+        table_name="commits",
+    )
+
+    df = run_insight("repo_lake_coverage", output_dir=str(output), org="Acme", days_back=60)
+
+    by_repo = {row["repo"]: row for _, row in df.iterrows()}
+    assert by_repo["backend"]["has_pr_data"] is True
+    assert by_repo["backend"]["has_commit_data"] is False
+    assert by_repo["ledger-only"]["has_pr_data"] is False
+    assert by_repo["ledger-only"]["has_commit_data"] is True
+
+
 def test_traceability_insight_reads_delivery_lake(tmp_path):
     output = tmp_path / "output"
     write_rows_to_hive(

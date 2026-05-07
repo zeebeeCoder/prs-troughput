@@ -16,8 +16,14 @@ STRING_COLUMNS_BY_TABLE = {
     ),
     "commits": (
         "org", "repo", "sha", "author_name", "author_email", "committer_name",
-        "committer_email", "subject", "body", "branch_refs", "top_level_dirs", "file_exts",
+        "committer_email", "subject", "body", "source_kinds", "branch_refs", "top_level_dirs", "file_exts",
         "task_id", "spec_name", "conventional_type", "conventional_scope", "activity_class",
+    ),
+    "commit_links": (
+        "org", "repo", "sha", "source_kind", "source_id", "branch", "evidence",
+    ),
+    "delivery_events": (
+        "org", "repo", "delivery_sha", "delivery_mode", "evidence",
     ),
     "branches": (
         "org", "repo", "branch", "head_sha", "default_branch", "default_head_sha",

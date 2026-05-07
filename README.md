@@ -64,6 +64,10 @@ uv run pr-metrics --org your-org --full-scan --days 30
 uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger
 uv run pr-metrics --org your-org --repo coto_joy,coto_backend --days 30 --include-ledger
 
+# Bound the full commit event ledger collection across default branch, PR commits, and branch commits
+uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger \
+  --commit-limit 40 --pr-limit 50 --pr-commit-limit 100 --branch-limit 50 --branch-commit-limit 100
+
 # Generate combined delivery report from collected PR/commit/branch data
 uv run pr-metrics --org your-org --repo backend-api --days 30 --delivery-report
 uv run pr-metrics --org your-org --repo backend-api --days 30 --delivery-report --branch-active-days 14
@@ -91,10 +95,13 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --validate-local ~
 | `--terminal` | False | Rich terminal report with styling |
 | `--top-n N` | 5 | Top contributors in weekly breakdown |
 | `--include-ledger` | False | Collect commit and branch ledger datasets in addition to PRs |
-| `--include-commits` | False | Collect default-branch commit facts only |
+| `--include-commits` | False | Collect commit event ledger data from default branch, PR commit lists, and branch scans |
 | `--include-branches` | False | Collect remote branch snapshots only |
 | `--commit-limit N` | 100 | Max default-branch commits to collect per repo |
+| `--pr-limit N` | 100 | Max recent PRs whose commit lists are collected per repo |
+| `--pr-commit-limit N` | 100 | Max commits to collect per PR via the PR commits API |
 | `--branch-limit N` | 100 | Max branches to collect per repo |
+| `--branch-commit-limit N` | 100 | Max ahead commits to collect per branch |
 | `--skip-commit-files` | False | Skip per-file commit facts to reduce GitHub API work |
 | `--branch-active-days N` | 30 | Treat branches with commits in this many days as active WIP |
 | `--delivery-report` | False | Show combined merged PR + direct main commit + branch WIP report |
@@ -170,11 +177,15 @@ See [docs/CONTRIBUTOR_METRICS.md](docs/CONTRIBUTOR_METRICS.md) for detailed docu
 
 ### 📦 Git Delivery Ledger Metrics
 - PR raw fields for queue health: `updated_at`, `head_ref`, `head_sha`, review requests, CI status, mergeability
-- Default-branch commits with Conventional Commit parsing and activity classes
-- Direct-to-main commit lane separated from PR-linked squash/merge commits when detectable
+- Canonical commit facts deduped by SHA across default branch scans, PR commit-list API rows, and active branch compare scans
+- `commit_links` facts preserving source membership: default branch, `pr/<number>`, and `branch/<name>` evidence without double-counting commits
+- `delivery_events` facts for default-branch landing events, classed as `squash`, `merge_commit`, or `direct_main_candidate`
+- Direct-to-main candidate lane separated from PR-linked squash/merge delivery events when detectable
 - Branch snapshots with ahead/behind counts and open-PR linkage
 - Active invisible WIP: branches ahead of default branch without an open PR, filtered by recent branch activity
 - Stale branch WIP bucket so old long-lived branches do not swamp the live queue
+
+See [docs/LEDGER_GRAIN_CONTRACTS.md](docs/LEDGER_GRAIN_CONTRACTS.md) for the foundational ledger grain contracts and CI fixture approach.
 
 ### 🧠 DuckDB Insight Slices
 

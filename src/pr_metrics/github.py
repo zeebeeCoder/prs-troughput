@@ -234,13 +234,38 @@ def get_repo_branches(org, repo_name, limit=100):
     return rows
 
 
-def get_repo_commits(org, repo_name, days_back=14, limit=100, include_files=True):
-    """Collect default-branch commits for a repository via gh API.
+def _commit_source(source_kind, source_id, pr_number=None, branch=None, evidence=None):
+    """Return normalized source-membership metadata for a commit observation."""
+    return {
+        'source_kind': source_kind,
+        'source_id': source_id,
+        'pr_number': pr_number,
+        'branch': branch,
+        'evidence': evidence,
+    }
 
-    The list endpoint is intentionally scoped to the default branch. This makes
-    `on_main` true for collected rows and gives a cheap direct-main lane without
-    requiring local clones for every repo.
-    """
+
+def _with_commit_source(commit, source_kind, source_id, pr_number=None, branch=None, evidence=None):
+    """Attach source-membership metadata to a GitHub commit object."""
+    if not isinstance(commit, dict):
+        return commit
+    row = dict(commit)
+    sources = list(row.get('_ledger_sources') or [])
+    sources.append(_commit_source(source_kind, source_id, pr_number=pr_number, branch=branch, evidence=evidence))
+    row['_ledger_sources'] = sources
+    return row
+
+
+def _commit_detail(org, repo_name, sha, fallback, include_files):
+    """Fetch a detailed commit when needed, otherwise return the list payload."""
+    if include_files:
+        detail = run_gh_api(f"repos/{org}/{repo_name}/commits/{sha}")
+        return detail if isinstance(detail, dict) else fallback
+    return fallback
+
+
+def get_repo_commits(org, repo_name, days_back=14, limit=100, include_files=True):
+    """Collect default-branch commits for a repository via gh API."""
     since_iso = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat().replace('+00:00', 'Z')
     commits = run_gh_api(
         f"repos/{org}/{repo_name}/commits?since={quote(since_iso, safe=':TZ-')}&per_page={min(limit, 100)}"
@@ -251,10 +276,73 @@ def get_repo_commits(org, repo_name, days_back=14, limit=100, include_files=True
         sha = commit.get('sha')
         if not sha:
             continue
-        if include_files:
-            detail = run_gh_api(f"repos/{org}/{repo_name}/commits/{sha}")
-            detailed_commits.append(detail if isinstance(detail, dict) else commit)
-        else:
-            detailed_commits.append(commit)
+        detail = _commit_detail(org, repo_name, sha, commit, include_files)
+        detailed_commits.append(_with_commit_source(
+            detail,
+            'default_branch',
+            'default',
+            evidence='default_branch_commits',
+        ))
 
     return detailed_commits
+
+
+def get_repo_pr_commits(org, repo_name, days_back=14, pr_limit=100, commit_limit=100, include_files=True):
+    """Collect commits that GitHub records as members of recent PRs."""
+    pr_commits = []
+    for pr in get_repo_prs(org, repo_name, days_back)[:pr_limit]:
+        pr_number = pr.get('number')
+        if not pr_number:
+            continue
+        commits = run_gh_api(f"repos/{org}/{repo_name}/pulls/{pr_number}/commits?per_page={min(commit_limit, 100)}")
+        branch = pr.get('headRefName')
+        for commit in commits[:commit_limit]:
+            sha = commit.get('sha')
+            if not sha:
+                continue
+            detail = _commit_detail(org, repo_name, sha, commit, include_files)
+            pr_commits.append(_with_commit_source(
+                detail,
+                'pr_commit',
+                f'pr/{pr_number}',
+                pr_number=pr_number,
+                branch=branch,
+                evidence=f'pulls/{pr_number}/commits',
+            ))
+    return pr_commits
+
+
+def _branch_compare_commits(org, repo_name, default_branch, branch_name):
+    """Return compare commits for commits reachable from a branch ahead of default."""
+    encoded_default = quote(default_branch, safe='')
+    encoded_branch = quote(branch_name, safe='')
+    compare = run_gh_api(f"repos/{org}/{repo_name}/compare/{encoded_default}...{encoded_branch}")
+    return compare.get('commits') if isinstance(compare, dict) else []
+
+
+def get_repo_branch_commits(org, repo_name, branch_limit=100, commit_limit=100, include_files=True):
+    """Collect commits observed on active remote branches ahead of default."""
+    default_branch = get_default_branch(org, repo_name)
+    if not default_branch:
+        print(f"⚠️  Could not resolve default branch for {org}/{repo_name}")
+        return []
+
+    branches = run_gh_api(f"repos/{org}/{repo_name}/branches?per_page={min(branch_limit, 100)}")
+    branch_commits = []
+    for branch in branches[:branch_limit]:
+        branch_name = branch.get('name')
+        if not branch_name or branch_name == default_branch:
+            continue
+        for commit in _branch_compare_commits(org, repo_name, default_branch, branch_name)[:commit_limit]:
+            sha = commit.get('sha')
+            if not sha:
+                continue
+            detail = _commit_detail(org, repo_name, sha, commit, include_files)
+            branch_commits.append(_with_commit_source(
+                detail,
+                'branch_commit',
+                f'branch/{branch_name}',
+                branch=branch_name,
+                evidence=f'compare/{default_branch}...{branch_name}',
+            ))
+    return branch_commits

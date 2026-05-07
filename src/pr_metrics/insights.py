@@ -91,13 +91,15 @@ INSIGHTS: dict[str, Insight] = {
         """,
     ),
     "kinetics_weekly": Insight(
-        description="Weekly repo-level velocity and acceleration/deceleration signals.",
-        required_views=("prs_latest", "commits_latest"),
+        description="Weekly repo-level authored commit, delivery, and PR velocity signals by explicit grain.",
+        required_views=("prs_latest", "commits_latest", "delivery_events_latest"),
         sql="""
             WITH weeks AS (
                 SELECT date_trunc('week', created_at) AS week, org, repo FROM prs_latest WHERE created_at IS NOT NULL
                 UNION
                 SELECT date_trunc('week', committed_at) AS week, org, repo FROM commits_latest WHERE committed_at IS NOT NULL
+                UNION
+                SELECT date_trunc('week', delivered_at) AS week, org, repo FROM delivery_events_latest WHERE delivered_at IS NOT NULL
             ),
             pr_metrics AS (
                 SELECT
@@ -116,12 +118,24 @@ INSIGHTS: dict[str, Insight] = {
                     date_trunc('week', committed_at) AS week,
                     org,
                     repo,
-                    COUNT(*) AS commits,
-                    COUNT(*) FILTER (WHERE is_direct_main) AS direct_main_commits,
+                    COUNT(*) AS authored_commit_events,
+                    COUNT(*) FILTER (WHERE COALESCE(source_kinds, 'default_branch') LIKE '%default_branch%') AS default_branch_commit_events,
                     SUM(COALESCE(additions, 0) + COALESCE(deletions, 0)) AS commit_churn,
                     COUNT(DISTINCT author_email) AS commit_authors
                 FROM commits_latest
                 WHERE committed_at IS NOT NULL
+                GROUP BY 1, 2, 3
+            ),
+            delivery_metrics AS (
+                SELECT
+                    date_trunc('week', delivered_at) AS week,
+                    org,
+                    repo,
+                    COUNT(*) AS delivered_commit_events,
+                    COUNT(*) FILTER (WHERE delivery_mode = 'direct_main_candidate') AS direct_main_candidates,
+                    COUNT(*) FILTER (WHERE pr_number IS NOT NULL) AS pr_linked_delivery_events
+                FROM delivery_events_latest
+                WHERE delivered_at IS NOT NULL
                 GROUP BY 1, 2, 3
             ),
             weekly AS (
@@ -131,13 +145,17 @@ INSIGHTS: dict[str, Insight] = {
                     w.repo,
                     COALESCE(p.pr_created, 0) AS pr_created,
                     COALESCE(p.pr_merged, 0) AS pr_merged,
-                    COALESCE(c.commits, 0) AS commits,
-                    COALESCE(c.direct_main_commits, 0) AS direct_main_commits,
+                    COALESCE(c.authored_commit_events, 0) AS authored_commit_events,
+                    COALESCE(c.default_branch_commit_events, 0) AS default_branch_commit_events,
+                    COALESCE(d.delivered_commit_events, 0) AS delivered_commit_events,
+                    COALESCE(d.direct_main_candidates, 0) AS direct_main_candidates,
+                    COALESCE(d.pr_linked_delivery_events, 0) AS pr_linked_delivery_events,
                     COALESCE(p.pr_churn, 0) + COALESCE(c.commit_churn, 0) AS total_churn,
                     COALESCE(c.commit_authors, 0) AS commit_authors
                 FROM weeks w
                 LEFT JOIN pr_metrics p USING (week, org, repo)
                 LEFT JOIN commit_metrics c USING (week, org, repo)
+                LEFT JOIN delivery_metrics d USING (week, org, repo)
             )
             SELECT
                 week::DATE AS week,
@@ -145,12 +163,16 @@ INSIGHTS: dict[str, Insight] = {
                 repo,
                 pr_created,
                 pr_merged,
-                commits,
-                direct_main_commits,
-                ROUND(100.0 * direct_main_commits / NULLIF(commits, 0), 1) AS direct_main_pct,
+                authored_commit_events,
+                default_branch_commit_events,
+                delivered_commit_events,
+                direct_main_candidates,
+                ROUND(100.0 * direct_main_candidates / NULLIF(delivered_commit_events, 0), 1) AS direct_main_delivery_pct,
+                pr_linked_delivery_events,
                 total_churn,
                 commit_authors,
-                commits - LAG(commits) OVER (PARTITION BY org, repo ORDER BY week) AS commit_velocity_delta,
+                authored_commit_events - LAG(authored_commit_events) OVER (PARTITION BY org, repo ORDER BY week) AS authored_commit_velocity_delta,
+                delivered_commit_events - LAG(delivered_commit_events) OVER (PARTITION BY org, repo ORDER BY week) AS delivery_velocity_delta,
                 total_churn - LAG(total_churn) OVER (PARTITION BY org, repo ORDER BY week) AS churn_delta,
                 pr_created - LAG(pr_created) OVER (PARTITION BY org, repo ORDER BY week) AS pr_velocity_delta
             FROM weekly
@@ -423,6 +445,24 @@ DELIVERY_DATASETS = (
         "order_by": "COALESCE(collected_at, last_commit_at)",
     },
     {
+        "raw_view": "commit_links_raw",
+        "latest_view": "commit_links_latest",
+        "relative_dir": ("ledger", "commit_links"),
+        "days_back": "configured",
+        "date_column": "observed_at",
+        "partition_by": "org, repo, sha, source_kind, source_id",
+        "order_by": "COALESCE(collected_at, observed_at)",
+    },
+    {
+        "raw_view": "delivery_events_raw",
+        "latest_view": "delivery_events_latest",
+        "relative_dir": ("ledger", "delivery_events"),
+        "days_back": "configured",
+        "date_column": "delivered_at",
+        "partition_by": "org, repo, delivery_sha",
+        "order_by": "COALESCE(collected_at, delivered_at)",
+    },
+    {
         "raw_view": "commit_files_raw",
         "latest_view": "commit_files_latest",
         "relative_dir": ("ledger", "commit_files"),
@@ -470,6 +510,76 @@ def _create_delivery_dataset_views(con, root: Path, config: dict, org, repo, day
     return {config["raw_view"], config["latest_view"]}
 
 
+def _view_columns(con, view_name: str) -> set[str]:
+    """Return column names for an existing DuckDB view."""
+    return set(con.execute(f"DESCRIBE {view_name}").fetchdf()["column_name"])
+
+
+def _ensure_view_columns(con, view_name: str, defaults: dict[str, str]) -> None:
+    """Add compatibility columns to a latest view when older parquet lacks them."""
+    columns = _view_columns(con, view_name)
+    missing = {name: expr for name, expr in defaults.items() if name not in columns}
+    if not missing:
+        return
+    temp_name = f"_{view_name}_compat"
+    default_select = ", ".join(f"{expr} AS {name}" for name, expr in missing.items())
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {temp_name} AS SELECT *, {default_select} FROM {view_name}")
+    con.execute(f"CREATE OR REPLACE VIEW {view_name} AS SELECT * FROM {temp_name}")
+
+
+def _delivery_mode_sql() -> str:
+    """Return SQL that classifies legacy default-branch commits as delivery events."""
+    return """
+        CASE
+            WHEN pr_number IS NOT NULL AND COALESCE(parent_count, 0) > 1 THEN 'merge_commit'
+            WHEN pr_number IS NOT NULL THEN 'squash'
+            WHEN COALESCE(parent_count, 0) > 1 THEN 'merge_commit'
+            ELSE 'direct_main_candidate'
+        END
+    """
+
+
+def _create_legacy_delivery_events_view(con, available: set[str]) -> None:
+    """Synthesize delivery events from older commit-only ledgers when needed."""
+    if "delivery_events_latest" in available or "commits_latest" not in available:
+        return
+    _ensure_view_columns(con, "commits_latest", {
+        "source_kinds": "'default_branch'",
+        "on_main": "true",
+        "pr_number": "NULL::INTEGER",
+        "parent_count": "NULL::INTEGER",
+    })
+    con.execute(f"""
+        CREATE OR REPLACE VIEW delivery_events_latest AS
+        SELECT
+            org,
+            repo,
+            year,
+            month,
+            collected_at,
+            sha AS delivery_sha,
+            committed_at AS delivered_at,
+            {_delivery_mode_sql()} AS delivery_mode,
+            pr_number,
+            'legacy_commits_latest' AS evidence
+        FROM commits_latest
+        WHERE COALESCE(on_main, true)
+    """)
+    available.add("delivery_events_latest")
+
+
+def _apply_compatibility_views(con, available: set[str]) -> None:
+    """Create compatibility views for old parquet schemas where safe."""
+    if "commits_latest" in available:
+        _ensure_view_columns(con, "commits_latest", {
+            "source_kinds": "'default_branch'",
+            "on_main": "true",
+            "pr_number": "NULL::INTEGER",
+            "parent_count": "NULL::INTEGER",
+        })
+    _create_legacy_delivery_events_view(con, available)
+
+
 def create_delivery_lake_views(
     output_dir: str = "output",
     org: str | None = None,
@@ -482,6 +592,7 @@ def create_delivery_lake_views(
     available: set[str] = set()
     for config in DELIVERY_DATASETS:
         available.update(_create_delivery_dataset_views(con, root, config, org, repo, days_back))
+    _apply_compatibility_views(con, available)
     return con, available
 
 

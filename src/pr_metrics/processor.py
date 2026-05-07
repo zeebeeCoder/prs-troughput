@@ -418,8 +418,48 @@ def _commit_message_fields(subject, body, conventional_type, conventional_scope,
     }
 
 
+def _commit_sources(commit, fallback_pr_number=None):
+    """Return normalized source observations for a commit row."""
+    sources = list(commit.get('_ledger_sources') or [])
+    if sources:
+        return sources
+    return [{
+        'source_kind': 'default_branch',
+        'source_id': 'default',
+        'pr_number': fallback_pr_number,
+        'branch': None,
+        'evidence': 'legacy_default_branch_commit',
+    }]
+
+
+def _commit_pr_number(subject_pr_number, sources):
+    """Resolve the best PR number evidence for a commit."""
+    for source in sources:
+        if source.get('pr_number') is not None:
+            return source.get('pr_number')
+    return subject_pr_number
+
+
+def _source_kinds(sources):
+    """Return a sorted compact source-kind list for canonical commit rows."""
+    return ','.join(sorted({source.get('source_kind') for source in sources if source.get('source_kind')}))
+
+
+def _branch_refs(sources):
+    """Return a sorted compact branch-ref list for canonical commit rows."""
+    branches = {source.get('branch') for source in sources if source.get('branch')}
+    if any(source.get('source_kind') == 'default_branch' for source in sources):
+        branches.add('default')
+    return ','.join(sorted(branches))
+
+
+def _on_main(sources):
+    """Return whether a commit was observed on the default branch."""
+    return any(source.get('source_kind') == 'default_branch' for source in sources)
+
+
 def _build_commit_row(org, repo_name, commit, collected_at):
-    """Transform one GitHub commit detail into a commit ledger row."""
+    """Transform one GitHub commit detail into a canonical commit ledger row."""
     commit_obj = commit.get('commit') or {}
     committer_obj = commit_obj.get('committer') or {}
     subject, body = _commit_message_parts(commit_obj)
@@ -429,7 +469,10 @@ def _build_commit_row(org, repo_name, commit, collected_at):
     activity_class = classify_activity(subject, paths, conventional_type)
     parent_count = len(commit.get('parents') or [])
     committed_at = _parse_dt(committer_obj.get('date'))
-    pr_number = _extract_pr_number_from_subject(subject)
+    subject_pr_number = _extract_pr_number_from_subject(subject)
+    sources = _commit_sources(commit, fallback_pr_number=subject_pr_number)
+    pr_number = _commit_pr_number(subject_pr_number, sources)
+    on_main = _on_main(sources)
 
     return {
         **_commit_core_fields(org, repo_name, commit, collected_at, committed_at),
@@ -438,18 +481,19 @@ def _build_commit_row(org, repo_name, commit, collected_at):
         'parent_count': parent_count,
         'is_merge_commit': parent_count > 1,
         'is_revert': activity_class == 'revert',
-        'branch_refs': 'default',
-        'on_main': True,
-        'is_direct_main': _is_direct_main(parent_count, pr_number),
+        'source_kinds': _source_kinds(sources),
+        'branch_refs': _branch_refs(sources),
+        'on_main': on_main,
+        'is_direct_main': _is_direct_main(parent_count, pr_number, on_main),
         'pr_number': pr_number,
         **_commit_change_fields(commit, files, paths),
         **_commit_traceability_fields(subject, body, paths),
     }
 
 
-def _is_direct_main(parent_count, pr_number):
+def _is_direct_main(parent_count, pr_number, on_main=True):
     """Return whether a default-branch commit appears unlinked from a PR."""
-    return parent_count == 1 and pr_number is None
+    return bool(on_main and parent_count == 1 and pr_number is None)
 
 
 def _build_commit_file_row(org, repo_name, commit, file, committed_at, collected_at):
@@ -485,17 +529,138 @@ def _build_commit_file_rows(org, repo_name, commit, collected_at):
     ]
 
 
-def process_commits_to_rows(all_commits_data, org):
-    """Transform GitHub commit details into commit and commit-file rows."""
+def _commit_has_detail(commit):
+    """Return whether a commit payload has detail fields worth preserving."""
+    return bool(commit.get('files') or commit.get('stats'))
+
+
+def _merge_commit_observations(commits):
+    """Merge duplicate SHA observations while preserving source memberships."""
+    merged = {}
+    for commit in commits:
+        sha = commit.get('sha')
+        if not sha:
+            continue
+        if sha not in merged:
+            merged[sha] = dict(commit)
+            merged[sha]['_ledger_sources'] = list(commit.get('_ledger_sources') or [])
+            continue
+        existing = merged[sha]
+        existing['_ledger_sources'].extend(commit.get('_ledger_sources') or [])
+        if _commit_has_detail(commit) and not _commit_has_detail(existing):
+            replacement = dict(commit)
+            replacement['_ledger_sources'] = existing['_ledger_sources']
+            merged[sha] = replacement
+    return list(merged.values())
+
+
+def _commit_committed_at(commit):
+    """Return parsed commit timestamp from a GitHub commit payload."""
+    commit_obj = commit.get('commit') or {}
+    return _parse_dt((commit_obj.get('committer') or {}).get('date'))
+
+
+def _commit_subject_pr_number(commit):
+    """Return PR number parsed from a commit subject."""
+    subject, _body = _commit_message_parts(commit.get('commit') or {})
+    return _extract_pr_number_from_subject(subject)
+
+
+def _source_row_key(sha, source):
+    """Return a stable dedupe key for one commit-source fact."""
+    return (
+        sha,
+        source.get('source_kind'),
+        source.get('source_id'),
+        source.get('pr_number'),
+        source.get('branch'),
+    )
+
+
+def _build_commit_link_rows(org, repo_name, commit, collected_at):
+    """Transform commit source memberships into normalized link rows."""
+    sha = commit.get('sha')
+    committed_at = _commit_committed_at(commit)
+    year, month = _timestamp_partition(committed_at or collected_at)
+    sources = _commit_sources(commit, fallback_pr_number=_commit_subject_pr_number(commit))
+    rows = []
+    seen = set()
+    for source in sources:
+        key = _source_row_key(sha, source)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({
+            'org': org,
+            'repo': repo_name,
+            'year': year,
+            'month': month,
+            'collected_at': collected_at,
+            'sha': sha,
+            'source_kind': source.get('source_kind'),
+            'source_id': source.get('source_id'),
+            'pr_number': source.get('pr_number'),
+            'branch': source.get('branch'),
+            'observed_at': committed_at,
+            'evidence': source.get('evidence'),
+        })
+    return rows
+
+
+def _delivery_mode(parent_count, pr_number):
+    """Classify how a default-branch commit landed."""
+    if pr_number is not None:
+        return 'merge_commit' if parent_count > 1 else 'squash'
+    return 'merge_commit' if parent_count > 1 else 'direct_main_candidate'
+
+
+def _build_delivery_event_row(org, repo_name, commit, collected_at):
+    """Build a delivery event row for commits observed on the default branch."""
+    sources = _commit_sources(commit, fallback_pr_number=_commit_subject_pr_number(commit))
+    if not _on_main(sources):
+        return None
+    committed_at = _commit_committed_at(commit)
+    year, month = _timestamp_partition(committed_at or collected_at)
+    parent_count = len(commit.get('parents') or [])
+    pr_number = _commit_pr_number(_commit_subject_pr_number(commit), sources)
+    evidence = ','.join(sorted({source.get('evidence') for source in sources if source.get('evidence')}))
+    return {
+        'org': org,
+        'repo': repo_name,
+        'year': year,
+        'month': month,
+        'collected_at': collected_at,
+        'delivery_sha': commit.get('sha'),
+        'delivered_at': committed_at,
+        'delivery_mode': _delivery_mode(parent_count, pr_number),
+        'pr_number': pr_number,
+        'evidence': evidence,
+    }
+
+
+def process_commit_ledger_to_rows(all_commits_data, org):
+    """Transform commit observations into canonical, link, and delivery rows."""
     collected_at = pd.Timestamp(datetime.now(timezone.utc))
     commit_rows = []
     file_rows = []
+    link_rows = []
+    delivery_rows = []
 
     for repo_name, commits in all_commits_data.items():
-        for commit in commits:
+        for commit in _merge_commit_observations(commits):
             commit_rows.append(_build_commit_row(org, repo_name, commit, collected_at))
             file_rows.extend(_build_commit_file_rows(org, repo_name, commit, collected_at))
+            link_rows.extend(_build_commit_link_rows(org, repo_name, commit, collected_at))
+            delivery_row = _build_delivery_event_row(org, repo_name, commit, collected_at)
+            if delivery_row:
+                delivery_rows.append(delivery_row)
 
+    return commit_rows, file_rows, link_rows, delivery_rows
+
+
+def process_commits_to_rows(all_commits_data, org):
+    """Transform GitHub commit details into commit and commit-file rows."""
+    commit_rows, file_rows, _link_rows, _delivery_rows = process_commit_ledger_to_rows(all_commits_data, org)
     return commit_rows, file_rows
 
 

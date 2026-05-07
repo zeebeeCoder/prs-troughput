@@ -12,15 +12,17 @@ import pandas as pd
 from .github import (
     get_active_repos_from_search,
     get_org_repos,
+    get_repo_branch_commits,
     get_repo_branches,
     get_repo_commits,
+    get_repo_pr_commits,
     get_repo_prs,
 )
 from .insights import INSIGHTS, render_dataframe, run_insight
 from .processor import (
     load_latest_data,
     process_branches_to_rows,
-    process_commits_to_rows,
+    process_commit_ledger_to_rows,
     process_prs_to_dataframe,
 )
 from .reports import (
@@ -131,23 +133,42 @@ def _collect_prs(args, org, repos):
 
 
 def _collect_commit_ledger(args, org, repos):
-    """Collect and persist default-branch commit ledger rows."""
+    """Collect and persist commit ledger rows across default, PR, and branch sources."""
     all_commits_data = {}
     for i, repo in enumerate(repos, 1):
         repo_name = repo['name']
         print(f"  {i}/{len(repos)} commits: {repo_name}")
-        commits = get_repo_commits(
+        include_files = not args.skip_commit_files
+        commits = []
+        commits.extend(get_repo_commits(
             org,
             repo_name,
             days_back=args.days,
             limit=args.commit_limit,
-            include_files=not args.skip_commit_files,
-        )
+            include_files=include_files,
+        ))
+        commits.extend(get_repo_pr_commits(
+            org,
+            repo_name,
+            days_back=args.days,
+            pr_limit=getattr(args, 'pr_limit', 100),
+            commit_limit=getattr(args, 'pr_commit_limit', 100),
+            include_files=include_files,
+        ))
+        commits.extend(get_repo_branch_commits(
+            org,
+            repo_name,
+            branch_limit=args.branch_limit,
+            commit_limit=getattr(args, 'branch_commit_limit', 100),
+            include_files=include_files,
+        ))
         if commits:
             all_commits_data[repo_name] = commits
 
-    commit_rows, file_rows = process_commits_to_rows(all_commits_data, org)
+    commit_rows, file_rows, link_rows, delivery_rows = process_commit_ledger_to_rows(all_commits_data, org)
     write_rows_to_hive(commit_rows, f"{OUTPUT_DIR}/ledger/commits", table_name="commits")
+    write_rows_to_hive(link_rows, f"{OUTPUT_DIR}/ledger/commit_links", table_name="commit_links")
+    write_rows_to_hive(delivery_rows, f"{OUTPUT_DIR}/ledger/delivery_events", table_name="delivery_events")
     if not args.skip_commit_files:
         write_rows_to_hive(file_rows, f"{OUTPUT_DIR}/ledger/commit_files", table_name="commit_files")
 
@@ -195,10 +216,13 @@ def _build_parser():
     parser.add_argument('--repo', type=str, help='Filter by repository name; collection accepts comma-separated names')
     parser.add_argument('--top-n', type=int, default=5, help='Number of top contributors to show individual weekly breakdowns (default: 5)')
     parser.add_argument('--include-ledger', action='store_true', help='Collect commits and branches in addition to PRs')
-    parser.add_argument('--include-commits', action='store_true', help='Collect default-branch commit ledger data')
+    parser.add_argument('--include-commits', action='store_true', help='Collect commit event ledger data from default branch, PR commit lists, and branch scans')
     parser.add_argument('--include-branches', action='store_true', help='Collect remote branch snapshot data')
     parser.add_argument('--commit-limit', type=int, default=100, help='Max default-branch commits to collect per repo (default: 100)')
+    parser.add_argument('--pr-limit', type=int, default=100, help='Max recent PRs whose commit lists are collected per repo (default: 100)')
+    parser.add_argument('--pr-commit-limit', type=int, default=100, help='Max commits to collect per PR via the PR commits API (default: 100)')
     parser.add_argument('--branch-limit', type=int, default=100, help='Max branches to collect per repo (default: 100)')
+    parser.add_argument('--branch-commit-limit', type=int, default=100, help='Max ahead commits to collect per branch (default: 100)')
     parser.add_argument('--branch-active-days', type=int, default=30, help='Treat branches with commits in this many days as active WIP (default: 30)')
     parser.add_argument('--skip-commit-files', action='store_true', help='Skip per-file commit facts to reduce GitHub API work')
     parser.add_argument('--list-insights', action='store_true', help='List reusable DuckDB insight slices')

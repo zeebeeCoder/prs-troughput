@@ -86,6 +86,189 @@ def test_traceability_insight_reads_delivery_lake(tmp_path):
     assert "prs" in render_dataframe(df)
 
 
+def test_invisible_wip_excludes_semantic_environment_branches(tmp_path):
+    output = tmp_path / "output"
+    branch_rows = [
+        {
+            "org": "Acme",
+            "repo": "backend",
+            "year": 2026,
+            "month": 4,
+            "collected_at": _ts("2026-04-03T00:00:00"),
+            "branch": "qa",
+            "head_sha": "qa1",
+            "last_commit_at": _ts("2026-04-02T00:00:00"),
+            "last_author": "Ops",
+            "ahead_main": 3,
+            "behind_main": 0,
+            "has_open_pr": False,
+        },
+        {
+            "org": "Acme",
+            "repo": "backend",
+            "year": 2026,
+            "month": 4,
+            "collected_at": _ts("2026-04-03T00:00:00"),
+            "branch": "DEV-7/feature",
+            "head_sha": "dev7",
+            "last_commit_at": _ts("2026-04-02T00:00:00"),
+            "last_author": "Dev",
+            "ahead_main": 2,
+            "behind_main": 0,
+            "has_open_pr": False,
+            "task_id": "DEV-7",
+        },
+    ]
+    write_rows_to_hive(branch_rows, str(output / "ledger" / "branches"), table_name="branches")
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "unit_kind": "branch",
+                "unit_id": "qa",
+                "category_namespace": "branch_role",
+                "category": "environment",
+                "score": 1.0,
+                "confidence": "high",
+                "source": "rule",
+                "evidence": "branch=qa",
+                "classifier_version": "deterministic-rules-v1",
+                "taxonomy_version": "semantic-taxonomy-v1",
+                "embedding_model": "none",
+                "classified_at": _ts("2026-04-03T00:00:00"),
+                "observed_at": _ts("2026-04-02T00:00:00"),
+            },
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "unit_kind": "branch",
+                "unit_id": "DEV-7/feature",
+                "category_namespace": "branch_role",
+                "category": "ticket_wip",
+                "score": 0.9,
+                "confidence": "high",
+                "source": "rule",
+                "evidence": "branch=DEV-7/feature",
+                "classifier_version": "deterministic-rules-v1",
+                "taxonomy_version": "semantic-taxonomy-v1",
+                "embedding_model": "none",
+                "classified_at": _ts("2026-04-03T00:00:00"),
+                "observed_at": _ts("2026-04-02T00:00:00"),
+            },
+        ],
+        str(output / "ledger" / "semantic_categories"),
+        table_name="semantic_categories",
+    )
+
+    df = run_insight("invisible_wip", output_dir=str(output), org="Acme", repo="backend", days_back=60)
+
+    assert list(df["branch"]) == ["DEV-7/feature"]
+    assert df.iloc[0]["branch_roles"] == "ticket_wip"
+
+
+def test_refactoring_activity_uses_semantic_categories(tmp_path):
+    output = tmp_path / "output"
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "collected_at": _ts("2026-04-03T00:00:00"),
+                "sha": "abc123",
+                "author_name": "Dev",
+                "author_email": "dev@example.test",
+                "committed_at": _ts("2026-04-02T00:00:00"),
+                "source_kinds": "pr_commit",
+                "is_direct_main": False,
+                "additions": 5,
+                "deletions": 2,
+                "task_id": "DEV-7",
+            }
+        ],
+        str(output / "ledger" / "commits"),
+        table_name="commits",
+    )
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "collected_at": _ts("2026-04-03T00:00:00"),
+                "pr_number": 7,
+                "author": "dev",
+                "created_at": _ts("2026-04-01T00:00:00"),
+                "updated_at": _ts("2026-04-02T00:00:00"),
+                "merged_at": _ts("2026-04-02T00:00:00"),
+                "state": "merged",
+                "pr_size": 10,
+            }
+        ],
+        str(output / "data"),
+        table_name="pr_data",
+    )
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "collected_at": _ts("2026-04-03T00:00:00"),
+                "branch": "DEV-8/refactor",
+                "head_sha": "def456",
+                "last_commit_at": _ts("2026-04-02T00:00:00"),
+                "last_author": "Dev",
+                "ahead_main": 1,
+                "behind_main": 0,
+                "has_open_pr": False,
+            }
+        ],
+        str(output / "ledger" / "branches"),
+        table_name="branches",
+    )
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "unit_kind": "commit",
+                "unit_id": "abc123",
+                "category_namespace": "work_type",
+                "category": "refactor",
+                "score": 1.0,
+                "confidence": "high",
+                "source": "rule",
+                "evidence": "conventional_type=refactor",
+                "classifier_version": "deterministic-rules-v1",
+                "taxonomy_version": "semantic-taxonomy-v1",
+                "embedding_model": "none",
+                "classified_at": _ts("2026-04-03T00:00:00"),
+                "observed_at": _ts("2026-04-02T00:00:00"),
+            }
+        ],
+        str(output / "ledger" / "semantic_categories"),
+        table_name="semantic_categories",
+    )
+
+    df = run_insight("refactoring_activity", output_dir=str(output), org="Acme", repo="backend", days_back=60)
+
+    assert len(df) == 1
+    assert df.iloc[0]["unit_kind"] == "commit"
+    assert df.iloc[0]["churn"] == 7
+    assert df.iloc[0]["task_ids"] == "DEV-7"
+
+
 def test_kinetics_weekly_uses_explicit_commit_and_delivery_grains(tmp_path):
     output = tmp_path / "output"
     write_rows_to_hive(

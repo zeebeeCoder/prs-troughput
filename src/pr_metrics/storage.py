@@ -32,6 +32,10 @@ STRING_COLUMNS_BY_TABLE = {
     "commit_files": (
         "org", "repo", "sha", "path", "status", "top_level_dir", "extension",
     ),
+    "semantic_categories": (
+        "org", "repo", "unit_kind", "unit_id", "category_namespace", "category",
+        "confidence", "source", "evidence", "classifier_version", "taxonomy_version", "embedding_model",
+    ),
 }
 
 

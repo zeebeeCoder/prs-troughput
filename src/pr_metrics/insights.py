@@ -221,25 +221,129 @@ INSIGHTS: dict[str, Insight] = {
         """,
     ),
     "invisible_wip": Insight(
-        description="Latest branch snapshots that are ahead of default branch without an open PR.",
+        description="Latest branch snapshots ahead of default without an open PR, excluding semantic environment lanes.",
         required_views=("branches_latest",),
         sql="""
+            WITH branch_roles AS (
+                SELECT
+                    org,
+                    repo,
+                    unit_id AS branch,
+                    string_agg(category, ',') AS branch_roles
+                FROM semantic_categories_latest
+                WHERE unit_kind = 'branch'
+                  AND category_namespace = 'branch_role'
+                GROUP BY 1, 2, 3
+            )
             SELECT
-                org,
-                repo,
-                branch,
-                ahead_main,
-                behind_main,
-                last_author,
-                last_commit_at::DATE AS last_commit,
-                date_diff('day', last_commit_at, current_timestamp) AS idle_days,
-                task_id,
-                spec_name,
-                head_sha
-            FROM branches_latest
-            WHERE COALESCE(ahead_main, 0) > 0
-              AND NOT COALESCE(has_open_pr, false)
-            ORDER BY last_commit_at DESC, ahead_main DESC
+                b.org,
+                b.repo,
+                b.branch,
+                COALESCE(r.branch_roles, 'uncategorized') AS branch_roles,
+                b.ahead_main,
+                b.behind_main,
+                b.last_author,
+                b.last_commit_at::DATE AS last_commit,
+                date_diff('day', b.last_commit_at, current_timestamp) AS idle_days,
+                b.task_id,
+                b.spec_name,
+                b.head_sha
+            FROM branches_latest b
+            LEFT JOIN branch_roles r
+              ON r.org = b.org
+             AND r.repo = b.repo
+             AND r.branch = b.branch
+            WHERE COALESCE(b.ahead_main, 0) > 0
+              AND NOT COALESCE(b.has_open_pr, false)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM semantic_categories_latest excluded
+                  WHERE excluded.org = b.org
+                    AND excluded.repo = b.repo
+                    AND excluded.unit_kind = 'branch'
+                    AND excluded.unit_id = b.branch
+                    AND excluded.category_namespace = 'branch_role'
+                    AND excluded.category IN ('environment', 'deployment', 'release', 'bot_generated')
+              )
+            ORDER BY b.last_commit_at DESC, b.ahead_main DESC
+            LIMIT 200
+        """,
+    ),
+    "refactoring_activity": Insight(
+        description="Refactor-attributed commits, PRs, and branches by explicit semantic category facts.",
+        required_views=("semantic_categories_latest", "commits_latest", "prs_latest", "branches_latest"),
+        sql="""
+            WITH refactor_units AS (
+                SELECT DISTINCT org, repo, unit_kind, unit_id
+                FROM semantic_categories_latest
+                WHERE (category_namespace = 'work_type' AND category = 'refactor')
+                   OR (category_namespace = 'quality' AND category = 'refactoring')
+            ),
+            units AS (
+                SELECT
+                    c.org,
+                    c.repo,
+                    'commit' AS unit_kind,
+                    c.sha AS unit_id,
+                    c.committed_at AS observed_at,
+                    COALESCE(c.author_name, c.author_email, 'unknown') AS actor,
+                    c.task_id,
+                    c.spec_name,
+                    COALESCE(c.additions, 0) + COALESCE(c.deletions, 0) AS churn,
+                    c.subject AS summary
+                FROM commits_latest c
+
+                UNION ALL
+
+                SELECT
+                    p.org,
+                    p.repo,
+                    'pr' AS unit_kind,
+                    CAST(p.pr_number AS VARCHAR) AS unit_id,
+                    COALESCE(p.merged_at, p.updated_at, p.created_at) AS observed_at,
+                    COALESCE(p.author, 'unknown') AS actor,
+                    p.task_id,
+                    p.spec_name,
+                    COALESCE(p.pr_size, 0) AS churn,
+                    p.title AS summary
+                FROM prs_latest p
+
+                UNION ALL
+
+                SELECT
+                    b.org,
+                    b.repo,
+                    'branch' AS unit_kind,
+                    b.branch AS unit_id,
+                    b.last_commit_at AS observed_at,
+                    COALESCE(b.last_author, 'unknown') AS actor,
+                    b.task_id,
+                    b.spec_name,
+                    COALESCE(b.ahead_main, 0) AS churn,
+                    b.branch AS summary
+                FROM branches_latest b
+            )
+            SELECT
+                date_trunc('week', u.observed_at)::DATE AS week,
+                u.org,
+                u.repo,
+                u.actor,
+                u.unit_kind,
+                COUNT(*) AS units,
+                SUM(u.churn) AS churn,
+                COUNT(u.task_id) AS ticket_linked_units,
+                COUNT(u.spec_name) AS spec_linked_units,
+                string_agg(DISTINCT u.task_id, ',') FILTER (WHERE u.task_id IS NOT NULL) AS task_ids,
+                string_agg(DISTINCT u.spec_name, ',') FILTER (WHERE u.spec_name IS NOT NULL) AS spec_names
+            FROM units u
+            JOIN refactor_units r
+              ON r.org = u.org
+             AND r.repo = u.repo
+             AND r.unit_kind = u.unit_kind
+             AND r.unit_id = u.unit_id
+            WHERE u.observed_at IS NOT NULL
+            GROUP BY 1, 2, 3, 4, 5
+            ORDER BY week DESC, churn DESC, units DESC
             LIMIT 200
         """,
     ),
@@ -471,6 +575,15 @@ DELIVERY_DATASETS = (
         "partition_by": "org, repo, sha, path",
         "order_by": "collected_at",
     },
+    {
+        "raw_view": "semantic_categories_raw",
+        "latest_view": "semantic_categories_latest",
+        "relative_dir": ("ledger", "semantic_categories"),
+        "days_back": "configured",
+        "date_column": "observed_at",
+        "partition_by": "org, repo, unit_kind, unit_id, category_namespace, category",
+        "order_by": "COALESCE(classified_at, observed_at)",
+    },
 )
 
 
@@ -568,6 +681,37 @@ def _create_legacy_delivery_events_view(con, available: set[str]) -> None:
     available.add("delivery_events_latest")
 
 
+def _create_empty_semantic_categories_view(con, available: set[str]) -> None:
+    """Create an empty semantic view so branch insights can use optional categories."""
+    if "semantic_categories_latest" in available:
+        return
+    con.execute("""
+        CREATE OR REPLACE VIEW semantic_categories_latest AS
+        SELECT *
+        FROM (
+            SELECT
+                ''::VARCHAR AS org,
+                ''::VARCHAR AS repo,
+                NULL::INTEGER AS year,
+                NULL::INTEGER AS month,
+                ''::VARCHAR AS unit_kind,
+                ''::VARCHAR AS unit_id,
+                ''::VARCHAR AS category_namespace,
+                ''::VARCHAR AS category,
+                NULL::DOUBLE AS score,
+                ''::VARCHAR AS confidence,
+                ''::VARCHAR AS source,
+                ''::VARCHAR AS evidence,
+                ''::VARCHAR AS classifier_version,
+                ''::VARCHAR AS taxonomy_version,
+                ''::VARCHAR AS embedding_model,
+                NULL::TIMESTAMP AS classified_at,
+                NULL::TIMESTAMP AS observed_at
+        )
+        WHERE false
+    """)
+
+
 def _apply_compatibility_views(con, available: set[str]) -> None:
     """Create compatibility views for old parquet schemas where safe."""
     if "commits_latest" in available:
@@ -578,6 +722,7 @@ def _apply_compatibility_views(con, available: set[str]) -> None:
             "parent_count": "NULL::INTEGER",
         })
     _create_legacy_delivery_events_view(con, available)
+    _create_empty_semantic_categories_view(con, available)
 
 
 def create_delivery_lake_views(

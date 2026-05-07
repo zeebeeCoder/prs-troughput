@@ -68,6 +68,9 @@ uv run pr-metrics --org your-org --repo coto_joy,coto_backend --days 30 --includ
 uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger \
   --commit-limit 40 --pr-limit 50 --pr-commit-limit 100 --branch-limit 50 --branch-commit-limit 100
 
+# Persist deterministic semantic category facts for collected PR/commit/branch rows
+uv run pr-metrics --org your-org --repo backend-api --days 30 --classify-semantics
+
 # Generate combined delivery report from collected PR/commit/branch data
 uv run pr-metrics --org your-org --repo backend-api --days 30 --delivery-report
 uv run pr-metrics --org your-org --repo backend-api --days 30 --delivery-report --branch-active-days 14
@@ -103,6 +106,7 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --validate-local ~
 | `--branch-limit N` | 100 | Max branches to collect per repo |
 | `--branch-commit-limit N` | 100 | Max ahead commits to collect per branch |
 | `--skip-commit-files` | False | Skip per-file commit facts to reduce GitHub API work |
+| `--classify-semantics` | False | Persist deterministic semantic category facts for collected PR/commit/branch rows |
 | `--branch-active-days N` | 30 | Treat branches with commits in this many days as active WIP |
 | `--delivery-report` | False | Show combined merged PR + direct main commit + branch WIP report |
 | `--list-insights` | False | List reusable DuckDB insight slices |
@@ -182,10 +186,11 @@ See [docs/CONTRIBUTOR_METRICS.md](docs/CONTRIBUTOR_METRICS.md) for detailed docu
 - `delivery_events` facts for default-branch landing events, classed as `squash`, `merge_commit`, or `direct_main_candidate`
 - Direct-to-main candidate lane separated from PR-linked squash/merge delivery events when detectable
 - Branch snapshots with ahead/behind counts and open-PR linkage
-- Active invisible WIP: branches ahead of default branch without an open PR, filtered by recent branch activity
+- Active invisible WIP: branches ahead of default branch without an open PR, filtered by recent branch activity and semantic branch role
 - Stale branch WIP bucket so old long-lived branches do not swamp the live queue
+- `semantic_categories` facts for deterministic multi-label attribution across PR, commit, and branch units
 
-See [docs/LEDGER_GRAIN_CONTRACTS.md](docs/LEDGER_GRAIN_CONTRACTS.md) for the foundational ledger grain contracts and CI fixture approach.
+See [docs/LEDGER_GRAIN_CONTRACTS.md](docs/LEDGER_GRAIN_CONTRACTS.md) for the foundational ledger grain contracts and CI fixture approach. See [docs/SEMANTIC_CATEGORIES.md](docs/SEMANTIC_CATEGORIES.md) for the deterministic semantic category fact model.
 
 ### 🧠 DuckDB Insight Slices
 
@@ -197,10 +202,11 @@ The CLI is primarily a data-refresh engine, but it also exposes reusable SQL-bac
 | `intensity_weekly` | Weekly heatmap grain by repo, actor, and lane |
 | `kinetics_weekly` | Velocity and acceleration/deceleration signals by repo/week |
 | `review_queue` | Open PR queue buckets: review, author, CI, mergeability, stale |
-| `invisible_wip` | Branches ahead of default branch without open PRs |
+| `invisible_wip` | Branches ahead of default branch without open PRs, excluding semantic environment/deployment lanes when categories exist |
 | `direct_main_risk` | Direct-main commits ranked by churn/sensitive/no-test risk |
 | `traceability` | Task/spec marker coverage across PRs, commits, and branches |
 | `activity_mix` | Semantic activity classes by repo |
+| `refactoring_activity` | Refactor-attributed commits, PRs, and branches by actor/week/repo |
 
 ### 🔎 Local Accuracy Validation
 

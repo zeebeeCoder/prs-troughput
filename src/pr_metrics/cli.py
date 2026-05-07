@@ -18,7 +18,7 @@ from .github import (
     get_repo_pr_commits,
     get_repo_prs,
 )
-from .insights import INSIGHTS, render_dataframe, run_insight
+from .insights import INSIGHTS, create_delivery_lake_views, render_dataframe, run_insight
 from .processor import (
     load_latest_data,
     process_branches_to_rows,
@@ -31,6 +31,7 @@ from .reports import (
     generate_markdown_report,
     generate_rich_terminal_report,
 )
+from .semantic import classify_delivery_lake_rows
 from .storage import write_rows_to_hive, write_to_hive
 from .utils import resolve_org, sanitize_org_name
 from .validation import validate_local_repo
@@ -187,12 +188,40 @@ def _collect_branch_ledger(args, org, repos):
     write_rows_to_hive(branch_rows, f"{OUTPUT_DIR}/ledger/branches", table_name="branches")
 
 
+def _view_records(con, available, view_name):
+    """Return latest-view records when a delivery-lake view is available."""
+    if view_name not in available:
+        return []
+    return con.execute(f"SELECT * FROM {view_name}").fetchdf().to_dict("records")
+
+
+def _classify_semantics(args, org):
+    """Classify available PR, commit, and branch rows into semantic category facts."""
+    con, available = create_delivery_lake_views(
+        output_dir=OUTPUT_DIR,
+        org=org,
+        repo=args.repo,
+        days_back=args.days,
+    )
+    try:
+        rows = classify_delivery_lake_rows(
+            pr_rows=_view_records(con, available, "prs_latest"),
+            commit_rows=_view_records(con, available, "commits_latest"),
+            branch_rows=_view_records(con, available, "branches_latest"),
+        )
+    finally:
+        con.close()
+
+    write_rows_to_hive(rows, f"{OUTPUT_DIR}/ledger/semantic_categories", table_name="semantic_categories")
+
+
 def _collect_ledger(args, org, repos):
     """Collect optional Git delivery ledger datasets."""
     include_commits = args.include_ledger or args.include_commits
     include_branches = args.include_ledger or args.include_branches
+    include_semantics = args.classify_semantics
 
-    if not (include_commits or include_branches):
+    if not (include_commits or include_branches or include_semantics):
         return
 
     Path(f"{OUTPUT_DIR}/ledger").mkdir(parents=True, exist_ok=True)
@@ -200,6 +229,8 @@ def _collect_ledger(args, org, repos):
         _collect_commit_ledger(args, org, repos)
     if include_branches:
         _collect_branch_ledger(args, org, repos)
+    if include_semantics:
+        _classify_semantics(args, org)
 
 
 
@@ -225,6 +256,7 @@ def _build_parser():
     parser.add_argument('--branch-commit-limit', type=int, default=100, help='Max ahead commits to collect per branch (default: 100)')
     parser.add_argument('--branch-active-days', type=int, default=30, help='Treat branches with commits in this many days as active WIP (default: 30)')
     parser.add_argument('--skip-commit-files', action='store_true', help='Skip per-file commit facts to reduce GitHub API work')
+    parser.add_argument('--classify-semantics', action='store_true', help='Persist deterministic semantic category facts for collected PR/commit/branch rows')
     parser.add_argument('--list-insights', action='store_true', help='List reusable DuckDB insight slices')
     parser.add_argument('--insight', type=str, help='Run a named insight slice from existing parquet data')
     parser.add_argument('--format', choices=('table', 'json', 'csv'), default='table', help='Output format for --insight (default: table)')

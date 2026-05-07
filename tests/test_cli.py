@@ -89,14 +89,25 @@ def test_collect_ledger_respects_include_flags(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_collect_commit_ledger", lambda args, org, selected: calls.append(("commits", org, selected)))
     monkeypatch.setattr(cli, "_collect_branch_ledger", lambda args, org, selected: calls.append(("branches", org, selected)))
 
-    cli._collect_ledger(SimpleNamespace(include_ledger=False, include_commits=False, include_branches=False), "Acme", repos)
+    cli._collect_ledger(SimpleNamespace(include_ledger=False, include_commits=False, include_branches=False, classify_semantics=False), "Acme", repos)
     assert calls == []
 
-    cli._collect_ledger(SimpleNamespace(include_ledger=False, include_commits=True, include_branches=False), "Acme", repos)
+    cli._collect_ledger(SimpleNamespace(include_ledger=False, include_commits=True, include_branches=False, classify_semantics=False), "Acme", repos)
     assert calls == [("commits", "Acme", repos)]
 
-    cli._collect_ledger(SimpleNamespace(include_ledger=True, include_commits=False, include_branches=False), "Acme", repos)
+    cli._collect_ledger(SimpleNamespace(include_ledger=True, include_commits=False, include_branches=False, classify_semantics=False), "Acme", repos)
     assert calls[-2:] == [("commits", "Acme", repos), ("branches", "Acme", repos)]
+
+
+def test_collect_ledger_runs_semantic_classifier_when_requested(tmp_path, monkeypatch):
+    calls = []
+    repos = [{"name": "backend"}]
+    monkeypatch.setattr(cli, "OUTPUT_DIR", str(tmp_path / "output"))
+    monkeypatch.setattr(cli, "_classify_semantics", lambda args, org: calls.append(("semantics", org)))
+
+    cli._collect_ledger(SimpleNamespace(include_ledger=False, include_commits=False, include_branches=False, classify_semantics=True), "Acme", repos)
+
+    assert calls == [("semantics", "Acme")]
 
 
 def test_main_collection_delegates_to_collectors(monkeypatch):

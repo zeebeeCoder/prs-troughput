@@ -80,6 +80,7 @@ uv run pr-metrics --list-insights
 uv run pr-metrics --org your-org --insight active_repos --days 90
 uv run pr-metrics --org your-org --repo backend-api --insight kinetics_weekly --days 30
 uv run pr-metrics --org your-org --repo backend-api --insight direct_main_risk --format json
+uv run pr-metrics --org your-org --repo backend-api --insight untraced_units --format csv
 
 # Validate GitHub API parquet facts against a local clone without mutating it
 uv run pr-metrics --org your-org --repo backend-api --days 30 --validate-local ~/code/backend-api
@@ -190,7 +191,7 @@ See [docs/CONTRIBUTOR_METRICS.md](docs/CONTRIBUTOR_METRICS.md) for detailed docu
 - Stale branch WIP bucket so old long-lived branches do not swamp the live queue
 - `semantic_categories` facts for deterministic multi-label attribution across PR, commit, and branch units
 
-See [docs/LEDGER_GRAIN_CONTRACTS.md](docs/LEDGER_GRAIN_CONTRACTS.md) for the foundational ledger grain contracts and CI fixture approach. See [docs/SEMANTIC_CATEGORIES.md](docs/SEMANTIC_CATEGORIES.md) for the deterministic semantic category fact model.
+See [docs/LEDGER_GRAIN_CONTRACTS.md](docs/LEDGER_GRAIN_CONTRACTS.md) for the foundational ledger grain contracts and CI fixture approach. See [docs/SEMANTIC_CATEGORIES.md](docs/SEMANTIC_CATEGORIES.md) for the deterministic semantic category fact model and [docs/TRACEABILITY_INSIGHTS.md](docs/TRACEABILITY_INSIGHTS.md) for unit-level traceability workflows.
 
 ### 🧠 DuckDB Insight Slices
 
@@ -205,6 +206,8 @@ The CLI is primarily a data-refresh engine, but it also exposes reusable SQL-bac
 | `invisible_wip` | Branches ahead of default branch without open PRs, excluding semantic environment/deployment lanes when categories exist |
 | `direct_main_risk` | Direct-main commits ranked by churn/sensitive/no-test risk |
 | `traceability` | Task/spec marker coverage across PRs, commits, and branches |
+| `untraced_units` | Actionable PR, commit, and branch rows missing task/spec traceability |
+| `traceability_breakdown` | Traceability coverage by week, actor, unit kind, repo, and semantic group |
 | `activity_mix` | Semantic activity classes by repo |
 | `refactoring_activity` | Refactor-attributed commits, PRs, and branches by actor/week/repo |
 

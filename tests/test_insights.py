@@ -269,6 +269,239 @@ def test_refactoring_activity_uses_semantic_categories(tmp_path):
     assert df.iloc[0]["task_ids"] == "DEV-7"
 
 
+def test_untraced_units_lists_actionable_unit_rows(tmp_path):
+    output = tmp_path / "output"
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "collected_at": _ts("2026-04-03T00:00:00"),
+                "pr_number": 1,
+                "author": "dev",
+                "title": "feat: no ticket",
+                "url": "https://example.test/pr/1",
+                "created_at": _ts("2026-04-01T00:00:00"),
+                "updated_at": _ts("2026-04-02T00:00:00"),
+                "state": "open",
+                "pr_size": 100,
+                "changed_files": 3,
+                "head_sha": "pr1",
+                "task_id": None,
+                "spec_name": None,
+            },
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "collected_at": _ts("2026-04-03T00:00:00"),
+                "pr_number": 2,
+                "author": "dev",
+                "title": "feat: ticketed",
+                "url": "https://example.test/pr/2",
+                "created_at": _ts("2026-04-01T00:00:00"),
+                "updated_at": _ts("2026-04-02T00:00:00"),
+                "state": "open",
+                "pr_size": 10,
+                "changed_files": 1,
+                "head_sha": "pr2",
+                "task_id": "DEV-2",
+                "spec_name": None,
+            },
+        ],
+        str(output / "data"),
+        table_name="pr_data",
+    )
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "collected_at": _ts("2026-04-03T00:00:00"),
+                "sha": "abc123",
+                "author_name": "Dev",
+                "author_email": "dev@example.test",
+                "committed_at": _ts("2026-04-02T00:00:00"),
+                "subject": "fix: no ticket",
+                "source_kinds": "default_branch",
+                "is_direct_main": True,
+                "additions": 5,
+                "deletions": 2,
+                "changed_files": 1,
+                "task_id": None,
+                "spec_name": None,
+            }
+        ],
+        str(output / "ledger" / "commits"),
+        table_name="commits",
+    )
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "collected_at": _ts("2026-04-03T00:00:00"),
+                "branch": "qa",
+                "head_sha": "qa1",
+                "last_commit_at": _ts("2026-04-02T00:00:00"),
+                "last_author": "Ops",
+                "ahead_main": 3,
+                "behind_main": 0,
+                "has_open_pr": False,
+                "pr_url": None,
+                "task_id": None,
+                "spec_name": None,
+            }
+        ],
+        str(output / "ledger" / "branches"),
+        table_name="branches",
+    )
+
+    df = run_insight("untraced_units", output_dir=str(output), org="Acme", repo="backend", days_back=60)
+
+    assert set(df["unit_kind"]) == {"pr", "commit", "branch"}
+    assert "2" not in set(df["unit_id"])
+    pr_row = df[df["unit_kind"] == "pr"].iloc[0]
+    assert pr_row["summary"] == "feat: no ticket"
+    assert pr_row["url"] == "https://example.test/pr/1"
+
+
+def test_traceability_breakdown_groups_by_semantic_work_type(tmp_path):
+    output = tmp_path / "output"
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "collected_at": _ts("2026-04-03T00:00:00"),
+                "pr_number": 1,
+                "author": "dev",
+                "title": "feat: traced",
+                "url": "https://example.test/pr/1",
+                "created_at": _ts("2026-04-01T00:00:00"),
+                "updated_at": _ts("2026-04-02T00:00:00"),
+                "state": "open",
+                "pr_size": 10,
+                "changed_files": 1,
+                "task_id": "DEV-1",
+                "spec_name": None,
+            }
+        ],
+        str(output / "data"),
+        table_name="pr_data",
+    )
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "collected_at": _ts("2026-04-03T00:00:00"),
+                "sha": "abc123",
+                "author_name": "Dev",
+                "author_email": "dev@example.test",
+                "committed_at": _ts("2026-04-02T00:00:00"),
+                "subject": "refactor: no ticket",
+                "source_kinds": "pr_commit",
+                "is_direct_main": False,
+                "additions": 5,
+                "deletions": 2,
+                "changed_files": 1,
+                "task_id": None,
+                "spec_name": None,
+            }
+        ],
+        str(output / "ledger" / "commits"),
+        table_name="commits",
+    )
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "collected_at": _ts("2026-04-03T00:00:00"),
+                "branch": "DEV-2/feature",
+                "head_sha": "b1",
+                "last_commit_at": _ts("2026-04-02T00:00:00"),
+                "last_author": "Dev",
+                "ahead_main": 2,
+                "behind_main": 0,
+                "has_open_pr": False,
+                "task_id": "DEV-2",
+                "spec_name": None,
+            }
+        ],
+        str(output / "ledger" / "branches"),
+        table_name="branches",
+    )
+    write_rows_to_hive(
+        [
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "unit_kind": "commit",
+                "unit_id": "abc123",
+                "category_namespace": "work_type",
+                "category": "refactor",
+                "score": 1.0,
+                "confidence": "high",
+                "source": "rule",
+                "evidence": "conventional_type=refactor",
+                "classifier_version": "deterministic-rules-v1",
+                "taxonomy_version": "semantic-taxonomy-v1",
+                "embedding_model": "none",
+                "classified_at": _ts("2026-04-03T00:00:00"),
+                "observed_at": _ts("2026-04-02T00:00:00"),
+            },
+            {
+                "org": "Acme",
+                "repo": "backend",
+                "year": 2026,
+                "month": 4,
+                "unit_kind": "branch",
+                "unit_id": "DEV-2/feature",
+                "category_namespace": "branch_role",
+                "category": "ticket_wip",
+                "score": 1.0,
+                "confidence": "high",
+                "source": "rule",
+                "evidence": "branch=DEV-2/feature",
+                "classifier_version": "deterministic-rules-v1",
+                "taxonomy_version": "semantic-taxonomy-v1",
+                "embedding_model": "none",
+                "classified_at": _ts("2026-04-03T00:00:00"),
+                "observed_at": _ts("2026-04-02T00:00:00"),
+            },
+        ],
+        str(output / "ledger" / "semantic_categories"),
+        table_name="semantic_categories",
+    )
+
+    df = run_insight("traceability_breakdown", output_dir=str(output), org="Acme", repo="backend", days_back=60)
+
+    refactor_row = df[df["semantic_group"] == "refactor"].iloc[0]
+    assert refactor_row["unit_kind"] == "commit"
+    assert refactor_row["untraced_units"] == 1
+    assert refactor_row["untraced_churn"] == 7
+    ticket_row = df[df["semantic_group"] == "ticket_wip"].iloc[0]
+    assert ticket_row["traced_units"] == 1
+    assert ticket_row["traced_pct"] == 100.0
+
+
 def test_kinetics_weekly_uses_explicit_commit_and_delivery_grains(tmp_path):
     output = tmp_path / "output"
     write_rows_to_hive(

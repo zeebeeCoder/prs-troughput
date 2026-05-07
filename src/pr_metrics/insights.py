@@ -429,6 +429,190 @@ INSIGHTS: dict[str, Insight] = {
             FROM branches_latest
         """,
     ),
+    "untraced_units": Insight(
+        description="Actionable unit-level PR, commit, and branch rows missing task/spec traceability.",
+        required_views=("prs_latest", "commits_latest", "branches_latest"),
+        sql="""
+            WITH category_rollup AS (
+                SELECT
+                    org,
+                    repo,
+                    unit_kind,
+                    unit_id,
+                    string_agg(category, ',') FILTER (WHERE category_namespace = 'work_type') AS work_types,
+                    string_agg(category, ',') FILTER (WHERE category_namespace = 'branch_role') AS branch_roles,
+                    string_agg(category, ',') FILTER (WHERE category_namespace = 'component') AS components
+                FROM semantic_categories_latest
+                GROUP BY 1, 2, 3, 4
+            ),
+            units AS (
+                SELECT
+                    p.org,
+                    p.repo,
+                    'pr' AS unit_kind,
+                    CAST(p.pr_number AS VARCHAR) AS unit_id,
+                    COALESCE(p.updated_at, p.created_at) AS observed_at,
+                    COALESCE(p.author, 'unknown') AS actor,
+                    p.title AS summary,
+                    COALESCE(p.pr_size, 0) AS churn,
+                    COALESCE(p.changed_files, 0) AS changed_files,
+                    p.url,
+                    p.head_sha,
+                    p.task_id,
+                    p.spec_name
+                FROM prs_latest p
+
+                UNION ALL
+
+                SELECT
+                    c.org,
+                    c.repo,
+                    'commit' AS unit_kind,
+                    c.sha AS unit_id,
+                    c.committed_at AS observed_at,
+                    COALESCE(c.author_name, c.author_email, 'unknown') AS actor,
+                    c.subject AS summary,
+                    COALESCE(c.additions, 0) + COALESCE(c.deletions, 0) AS churn,
+                    COALESCE(c.changed_files, 0) AS changed_files,
+                    NULL AS url,
+                    c.sha AS head_sha,
+                    c.task_id,
+                    c.spec_name
+                FROM commits_latest c
+
+                UNION ALL
+
+                SELECT
+                    b.org,
+                    b.repo,
+                    'branch' AS unit_kind,
+                    b.branch AS unit_id,
+                    b.last_commit_at AS observed_at,
+                    COALESCE(b.last_author, 'unknown') AS actor,
+                    b.branch AS summary,
+                    COALESCE(b.ahead_main, 0) AS churn,
+                    0 AS changed_files,
+                    b.pr_url AS url,
+                    b.head_sha,
+                    b.task_id,
+                    b.spec_name
+                FROM branches_latest b
+            )
+            SELECT
+                u.unit_kind,
+                u.unit_id,
+                u.org,
+                u.repo,
+                u.actor,
+                u.observed_at::DATE AS observed,
+                COALESCE(r.work_types, 'uncategorized') AS work_types,
+                COALESCE(r.branch_roles, 'none') AS branch_roles,
+                COALESCE(r.components, 'none') AS components,
+                u.churn,
+                u.changed_files,
+                u.summary,
+                u.url,
+                u.head_sha
+            FROM units u
+            LEFT JOIN category_rollup r
+              ON r.org = u.org
+             AND r.repo = u.repo
+             AND r.unit_kind = u.unit_kind
+             AND r.unit_id = u.unit_id
+            WHERE u.task_id IS NULL
+              AND u.spec_name IS NULL
+            ORDER BY u.churn DESC, u.changed_files DESC, u.observed_at DESC NULLS LAST
+            LIMIT 300
+        """,
+    ),
+    "traceability_breakdown": Insight(
+        description="Traceability coverage by week, actor, unit kind, repo, and semantic work type.",
+        required_views=("prs_latest", "commits_latest", "branches_latest"),
+        sql="""
+            WITH category_rollup AS (
+                SELECT
+                    org,
+                    repo,
+                    unit_kind,
+                    unit_id,
+                    string_agg(category, ',') FILTER (WHERE category_namespace = 'work_type') AS work_types,
+                    string_agg(category, ',') FILTER (WHERE category_namespace = 'branch_role') AS branch_roles
+                FROM semantic_categories_latest
+                GROUP BY 1, 2, 3, 4
+            ),
+            units AS (
+                SELECT
+                    p.org,
+                    p.repo,
+                    'pr' AS unit_kind,
+                    CAST(p.pr_number AS VARCHAR) AS unit_id,
+                    COALESCE(p.updated_at, p.created_at) AS observed_at,
+                    COALESCE(p.author, 'unknown') AS actor,
+                    COALESCE(p.pr_size, 0) AS churn,
+                    p.task_id,
+                    p.spec_name
+                FROM prs_latest p
+
+                UNION ALL
+
+                SELECT
+                    c.org,
+                    c.repo,
+                    'commit' AS unit_kind,
+                    c.sha AS unit_id,
+                    c.committed_at AS observed_at,
+                    COALESCE(c.author_name, c.author_email, 'unknown') AS actor,
+                    COALESCE(c.additions, 0) + COALESCE(c.deletions, 0) AS churn,
+                    c.task_id,
+                    c.spec_name
+                FROM commits_latest c
+
+                UNION ALL
+
+                SELECT
+                    b.org,
+                    b.repo,
+                    'branch' AS unit_kind,
+                    b.branch AS unit_id,
+                    b.last_commit_at AS observed_at,
+                    COALESCE(b.last_author, 'unknown') AS actor,
+                    COALESCE(b.ahead_main, 0) AS churn,
+                    b.task_id,
+                    b.spec_name
+                FROM branches_latest b
+            ),
+            enriched AS (
+                SELECT
+                    u.*,
+                    COALESCE(r.work_types, r.branch_roles, 'uncategorized') AS semantic_group,
+                    (u.task_id IS NOT NULL OR u.spec_name IS NOT NULL) AS is_traced
+                FROM units u
+                LEFT JOIN category_rollup r
+                  ON r.org = u.org
+                 AND r.repo = u.repo
+                 AND r.unit_kind = u.unit_kind
+                 AND r.unit_id = u.unit_id
+            )
+            SELECT
+                date_trunc('week', observed_at)::DATE AS week,
+                org,
+                repo,
+                unit_kind,
+                actor,
+                semantic_group,
+                COUNT(*) AS units,
+                COUNT(*) FILTER (WHERE is_traced) AS traced_units,
+                COUNT(*) FILTER (WHERE NOT is_traced) AS untraced_units,
+                ROUND(100.0 * COUNT(*) FILTER (WHERE is_traced) / NULLIF(COUNT(*), 0), 1) AS traced_pct,
+                SUM(churn) AS churn,
+                SUM(churn) FILTER (WHERE NOT is_traced) AS untraced_churn
+            FROM enriched
+            WHERE observed_at IS NOT NULL
+            GROUP BY 1, 2, 3, 4, 5, 6
+            ORDER BY week DESC, untraced_churn DESC NULLS LAST, untraced_units DESC, units DESC
+            LIMIT 300
+        """,
+    ),
     "activity_mix": Insight(
         description="Semantic work mix by repo and activity class.",
         required_views=("commits_latest",),

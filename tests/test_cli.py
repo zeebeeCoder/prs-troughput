@@ -2,6 +2,7 @@ import sys
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from pr_metrics import cli
 
@@ -14,6 +15,16 @@ def test_main_lists_insights(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "active_repos" in output
     assert "traceability" in output
+
+
+def test_main_requires_org_with_cli_error(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["pr-metrics"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    assert exc_info.value.code == 2
+    assert "GitHub organization not specified" in capsys.readouterr().err
 
 
 def test_main_runs_named_insight(monkeypatch, capsys):
@@ -114,6 +125,7 @@ def test_main_collection_delegates_to_collectors(monkeypatch):
     calls = []
     repos = [{"name": "backend"}]
 
+    monkeypatch.setattr(cli, "ensure_gh_authenticated", lambda: None)
     monkeypatch.setattr(cli, "_select_repos", lambda args, org: repos)
     monkeypatch.setattr(cli, "_collect_prs", lambda args, org, selected: calls.append(("prs", org, selected)))
     monkeypatch.setattr(cli, "_collect_ledger", lambda args, org, selected: calls.append(("ledger", org, selected)))

@@ -11,6 +11,7 @@ import pandas as pd
 
 from .embeddings import DEFAULT_FIREWORKS_DIMENSIONS, DEFAULT_FIREWORKS_MODEL, create_fireworks_embedding_client
 from .github import (
+    ensure_gh_authenticated,
     get_active_repos_from_search,
     get_org_repos,
     get_repo_branch_commits,
@@ -499,7 +500,10 @@ def main(argv=None):
         _handle_print_skill_bundle()
         return
 
-    org = resolve_org(args.org)
+    try:
+        org = resolve_org(args.org)
+    except ValueError as exc:
+        parser.exit(2, f"error: {exc}\n")
 
     if args.insight:
         _handle_insight(args, org)
@@ -510,6 +514,9 @@ def main(argv=None):
     elif args.report:
         _handle_pr_report(args, org)
     else:
+        gh_error = ensure_gh_authenticated()
+        if gh_error:
+            parser.exit(2, f"error: {gh_error}\n")
         _handle_collection(args, org)
 
 

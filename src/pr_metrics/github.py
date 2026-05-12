@@ -6,10 +6,28 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
+
+
+def ensure_gh_authenticated():
+    """Return a human-readable error when GitHub CLI is missing or unauthenticated."""
+    if shutil.which("gh") is None:
+        return "GitHub CLI (`gh`) is not installed or not on PATH. Install it from https://cli.github.com/."
+
+    result = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True)
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout).strip()
+        suffix = f"\n{details}" if details else ""
+        return (
+            "GitHub CLI is not authenticated. Run `gh auth login` or set `GH_TOKEN` "
+            "with repository/org read access."
+            f"{suffix}"
+        )
+    return None
 
 
 def run_gh_command(cmd, max_retries=3, initial_delay=2):

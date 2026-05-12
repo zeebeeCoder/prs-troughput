@@ -4,6 +4,37 @@ from types import SimpleNamespace
 from pr_metrics import github
 
 
+def test_ensure_gh_authenticated_reports_missing_gh(monkeypatch):
+    monkeypatch.setattr(github.shutil, "which", lambda name: None)
+
+    assert "not installed" in github.ensure_gh_authenticated()
+
+
+def test_ensure_gh_authenticated_reports_auth_error(monkeypatch):
+    monkeypatch.setattr(github.shutil, "which", lambda name: "/usr/bin/gh")
+    monkeypatch.setattr(
+        github.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stderr="not logged in", stdout=""),
+    )
+
+    message = github.ensure_gh_authenticated()
+
+    assert "not authenticated" in message
+    assert "not logged in" in message
+
+
+def test_ensure_gh_authenticated_returns_none_when_ready(monkeypatch):
+    monkeypatch.setattr(github.shutil, "which", lambda name: "/usr/bin/gh")
+    monkeypatch.setattr(
+        github.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr="", stdout="ok"),
+    )
+
+    assert github.ensure_gh_authenticated() is None
+
+
 def test_run_gh_command_returns_json(monkeypatch):
     monkeypatch.setattr(
         github.subprocess,

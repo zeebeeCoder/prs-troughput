@@ -305,6 +305,10 @@ def _build_parser():
     parser.add_argument('--embedding-config', default=None, help='Optional semantic-cli config path containing fireworks_api_key')
     parser.add_argument('--list-insights', action='store_true', help='List reusable DuckDB insight slices')
     parser.add_argument('--insight', type=str, help='Run a named insight slice from existing parquet data')
+    parser.add_argument('--print-skill', action='store_true',
+                        help='Print the delivery-insights SKILL.md to stdout (pipe to ~/.claude/skills/delivery-insights/SKILL.md to install)')
+    parser.add_argument('--print-skill-bundle', action='store_true',
+                        help='Print a self-extracting bash script that installs SKILL.md + INSTALL.md + VALIDATION.md + docs/ + views/ to a target dir (pipe to bash)')
     parser.add_argument('--format', choices=('table', 'json', 'csv'), default='table', help='Output format for --insight (default: table)')
     parser.add_argument('--validate-local', type=str, help='Read-only local Git repo path to compare against existing parquet data')
     parser.add_argument('--remote', type=str, default='origin', help='Remote name for --validate-local branch checks (default: origin)')
@@ -315,6 +319,82 @@ def _handle_list_insights():
     """Print registered insight slices."""
     for name, insight in sorted(INSIGHTS.items()):
         print(f"{name}\t{insight.description}")
+
+
+def _repo_root() -> Path:
+    """Resolve the repo root from this file's location (works regardless of cwd)."""
+    return Path(__file__).resolve().parents[2]
+
+
+def _handle_print_skill():
+    """Print the delivery-insights SKILL.md to stdout."""
+    skill_path = _repo_root() / "skills" / "delivery-insights" / "SKILL.md"
+    if not skill_path.is_file():
+        raise FileNotFoundError(
+            f"SKILL.md not found at {skill_path}. "
+            "Run from a checkout of prs-troughput; the skill assets do not ship with the wheel."
+        )
+    print(skill_path.read_text(), end="")
+
+
+def _handle_print_skill_bundle():
+    """Emit a self-extracting bash script that recreates the full skill bundle.
+
+    Usage:
+        uv run pr-metrics --print-skill-bundle | bash -s ~/.claude/skills/delivery-insights
+    The script writes:
+      <target>/SKILL.md, INSTALL.md, VALIDATION.md
+      <target>/docs/data-contract.md, docs/analysis-playbook.md
+      <target>/views/*.sql
+    """
+    root = _repo_root()
+    bundle_files: list[tuple[str, Path]] = []
+
+    skill_dir = root / "skills" / "delivery-insights"
+    for name in ("SKILL.md", "INSTALL.md", "VALIDATION.md"):
+        path = skill_dir / name
+        if path.is_file():
+            bundle_files.append((name, path))
+
+    for name in ("data-contract.md", "analysis-playbook.md"):
+        path = root / "docs" / name
+        if path.is_file():
+            bundle_files.append((f"docs/{name}", path))
+
+    views_dir = root / "views"
+    if views_dir.is_dir():
+        for sql_path in sorted(views_dir.iterdir()):
+            if sql_path.suffix in (".sql", ".md"):
+                bundle_files.append((f"views/{sql_path.name}", sql_path))
+
+    if not bundle_files:
+        raise FileNotFoundError(
+            f"No skill assets found under {root}. Run from a checkout of prs-troughput."
+        )
+
+    print("#!/usr/bin/env bash")
+    print("# delivery-insights skill bundle — self-extracting installer")
+    print("# Usage: bash this-script <target-dir>   (default: ~/.claude/skills/delivery-insights)")
+    print("set -euo pipefail")
+    print('TARGET="${1:-$HOME/.claude/skills/delivery-insights}"')
+    print('mkdir -p "$TARGET/docs" "$TARGET/views"')
+    print('echo "Installing delivery-insights to $TARGET …"')
+    print()
+    # Use a unique heredoc terminator to avoid collisions with file content.
+    # Generate a random-ish marker derived from the file count so it's deterministic.
+    marker = f"DELIVERY_INSIGHTS_EOF_{abs(hash(tuple(name for name, _ in bundle_files))) % 10**8}"
+    for rel_name, path in bundle_files:
+        text = path.read_text()
+        # Defensive: warn if the marker happens to appear in content.
+        if marker in text:
+            raise RuntimeError(f"Heredoc marker {marker} collides with content of {rel_name}; bump the marker logic")
+        print(f'cat > "$TARGET/{rel_name}" <<\'{marker}\'')
+        # Heredoc body — keep verbatim, no quoting needed because of single-quoted marker.
+        print(text, end="" if text.endswith("\n") else "\n")
+        print(marker)
+        print()
+    print('echo "Installed ' + str(len(bundle_files)) + ' files to $TARGET"')
+    print('echo "Skill is now active. Test by asking Claude to use the delivery-insights skill."')
 
 
 def _handle_insight(args, org):
@@ -409,6 +489,14 @@ def main(argv=None):
 
     if args.list_insights:
         _handle_list_insights()
+        return
+
+    if args.print_skill:
+        _handle_print_skill()
+        return
+
+    if args.print_skill_bundle:
+        _handle_print_skill_bundle()
         return
 
     org = resolve_org(args.org)

@@ -163,6 +163,7 @@ $RECYCLE.BIN/
 
 # Project specific
 output/
+output.snapshot*/
 *.csv
 *.json
 *.xlsx

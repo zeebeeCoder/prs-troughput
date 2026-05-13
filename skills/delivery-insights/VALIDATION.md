@@ -5,7 +5,7 @@ A fresh-context agent (no prior conversation context) was asked to produce a lea
 ## Result
 
 - **Skill clarity**: ✅ "Did not need to improvise a single methodology choice."
-- **Views health**: ✅ All 8 SQL files ran first try with documented parameters.
+- **Views health**: ✅ Canonical SQL files ran first try with documented parameters during the fresh-context validation.
 - **Output**: methodology-compliant summary with all 6 reporting-hygiene items, correct archetype labels, attribution confidence reported.
 - **Improvement found**: §3 archetype thresholds were too sharp; led to addition of tolerance bands and tie-break order (committed in playbook v1.1).
 

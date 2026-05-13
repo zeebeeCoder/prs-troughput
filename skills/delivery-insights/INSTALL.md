@@ -10,7 +10,7 @@ Self-extracting installer; bundles SKILL.md + INSTALL.md + VALIDATION.md + docs/
 uv run pr-metrics --print-skill-bundle | bash -s ~/.claude/skills/delivery-insights
 ```
 
-The script `mkdir -p`s and writes 16 files. Pin the version by saving the output: `uv run pr-metrics --print-skill-bundle > install-skill.sh`.
+The script `mkdir -p`s and writes the skill docs, SQL views, and helper scripts. Pin the version by saving the output: `uv run pr-metrics --print-skill-bundle > install-skill.sh`.
 
 ## Option 2 — SKILL.md only via CLI
 
@@ -79,5 +79,14 @@ The skill assumes the working directory contains:
 - `docs/data-contract.md`
 - `docs/analysis-playbook.md`
 - `views/*.sql`
+- `scripts/temporal_heatmap.py` for optional image heatmaps
 
 If those are missing, the skill is inert — it explicitly tells the agent to fail loudly rather than improvise.
+
+Visualization helpers require optional plotting dependencies:
+
+```bash
+uv run --extra viz python scripts/temporal_heatmap.py --help
+# or, from a checkout:
+uv run --extra viz python skills/delivery-insights/scripts/temporal_heatmap.py --help
+```

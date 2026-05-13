@@ -48,6 +48,7 @@ The skill handles loading order and parameter substitution. See `skills/delivery
 | `volume_vs_impact.sql` | quality | Per-author authored commits vs median churn vs traceability. |
 | `punchcard.sql` | velocity | Per-author weekday × hour intensity. |
 | `weekday_rollup.sql` | velocity | Per-author weekday distribution (hour collapsed). |
+| `temporal_activity.sql` | velocity / quality / lifecycle | Normalized commit/PR/branch temporal facts for heatmaps and timelines. |
 | `off_hours_work.sql` | quality / burnout | Per-author per-week % off-hours commits. |
 | `invisible_wip_with_owner.sql` | lifecycle | Branches ahead of master + their head-commit author + idle days. |
 

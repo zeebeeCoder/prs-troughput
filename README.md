@@ -232,6 +232,44 @@ The CLI is primarily a data-refresh engine, but it also exposes reusable SQL-bac
 | `refactoring_activity` | Refactor-attributed commits, PRs, and branches by actor/week/repo |
 | `semantic_embedding_coverage` | Coverage and error status for persisted semantic unit embeddings |
 
+### 🖼️ Temporal Heatmap Images
+
+The `delivery-insights` skill ships reusable visualization helpers under `skills/delivery-insights/scripts/`. Install optional plotting dependencies with the `viz` extra:
+
+```bash
+# Contributors × days: daily commit density/frequency
+uv run --extra viz python skills/delivery-insights/scripts/temporal_heatmap.py \
+  --org Eve-World-Platform --repo coto-joy \
+  --preset author-day --top-n-rows 12 \
+  --output output/visualizations/coto-joy-author-day.png
+
+# Work type × days: feature/fix/refactor/deploy waves by churn
+uv run --extra viz python skills/delivery-insights/scripts/temporal_heatmap.py \
+  --org Eve-World-Platform --repo coto-joy \
+  --preset category-day --metric churn \
+  --output output/visualizations/coto-joy-category-churn-day.png
+
+# Contributors × days: authored strategic work only, not merge/deploy noise
+uv run --extra viz python skills/delivery-insights/scripts/temporal_heatmap.py \
+  --org Eve-World-Platform --repo coto-joy \
+  --preset author-day --metric strategic_units \
+  --output output/visualizations/coto-joy-author-strategic-day.png
+
+# Contributors × days: risk-weighted hotspots
+uv run --extra viz python skills/delivery-insights/scripts/temporal_heatmap.py \
+  --org Eve-World-Platform --repo coto-joy \
+  --preset author-day --metric risk_score \
+  --output output/visualizations/coto-joy-author-risk-day.png
+
+# GitHub-style calendar for one contributor
+uv run --extra viz python skills/delivery-insights/scripts/temporal_heatmap.py \
+  --org Eve-World-Platform --repo coto-joy \
+  --preset github-calendar --actors Zeebee \
+  --output output/visualizations/coto-joy-zeebee-calendar.png
+```
+
+The script uses `views/temporal_activity.sql`, so every image can be traced back to canonical DuckDB views rather than bespoke ad-hoc queries. Besides raw `count`, useful impact metrics include `strategic_units`, `operational_units`, `risk_score`, `risky_units`, `untraced_churn`, `direct_main_units`, `test_coverage_units`, `sensitive_units`, and `branch_ahead`.
+
 ### 🔎 Local Accuracy Validation
 
 Use `--validate-local` when you have a local clone and want to compare GitHub API-derived parquet facts with Git's own view of the repository:

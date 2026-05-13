@@ -57,6 +57,7 @@ Consult the four-lens table in `docs/analysis-playbook.md` §0:
 | User asks | Lens | Run |
 |---|---|---|
 | "How fast is the team shipping?" | velocity | `views/punchcard.sql` + `views/weekday_rollup.sql` + (existing CLI insight `kinetics_weekly`) |
+| "Show me temporal heatmaps / GitHub-style contribution calendars" | velocity / quality | `views/temporal_activity.sql` via `scripts/temporal_heatmap.py` |
 | "Who's doing what kind of work?" | velocity / quality | `views/work_attribution_macro.sql` → `views/work_mix_per_author.sql` |
 | "Is the team trading speed for risk?" | quality | `views/volume_vs_impact.sql` + (existing CLI insights `direct_main_risk`, `review_queue`) |
 | "Where is hidden work?" | lifecycle | `views/invisible_wip_with_owner.sql` + (existing CLI insight `untraced_units`) |
@@ -112,18 +113,48 @@ If a question genuinely doesn't fit the existing views:
 1. Consider whether the playbook needs a new lens or category — propose the extension first.
 2. If a new view is justified, add it under `views/` with a clear header comment (purpose, parameters, depends-on, expected lens).
 3. Update `views/README.md` index.
-4. Update this `SKILL.md` lens table if leadership-relevant.
+4. If a reusable visualization helper is justified, add it under `scripts/` with examples in `scripts/README.md`.
+5. Update this `SKILL.md` lens table if leadership-relevant.
 
 Do NOT fork the cascade. If a 7th attribution signal is needed, add it to `work_attribution_macro.sql` with appropriate weight.
 
 ## Visualization
 
-The data layer doesn't render — **outer agents own visualization**. Choose any library (matplotlib, plotly, altair, vega-lite, terminal blocks). Two examples for reference:
+The data layer mostly doesn't render — **outer agents own visualization** — but this skill now ships one reusable helper so agents do not reinvent the same temporal heatmap glue repeatedly.
 
-- `output/stress-test-2026-05-08/punchcard_demo.py` — matplotlib heatmap from `views/punchcard.sql`
-- `output/attribution-experiment-2026-05-08/visualize.py` — stacked bars + bubble charts from attributed commits
+Use `scripts/temporal_heatmap.py` when the user asks for image heatmaps over time. It uses:
 
-Keep visualization scripts under `output/<analysis-name>/` so they don't pollute the data-layer repo.
+1. `views/setup.sql`
+2. `views/contributors.sql`
+3. `views/work_attribution_macro.sql`
+4. `views/temporal_activity.sql`
+
+Common presets:
+
+- `author-day` — contributors × days, good for comparing contribution density/frequency.
+- `category-day` — work type × days, good for seeing feature/fix/refactor/deploy waves.
+- `github-calendar` — weekday × week GitHub-style calendar, optionally filtered to one actor.
+- `punchcard` — weekday × hour-of-day intensity.
+- `repo-day` — repository × day, good for org-wide local-lake comparisons.
+
+Do not default to raw `count` when the user asks about impact. Prefer one of these richer metrics:
+
+- `strategic_units` / `operational_units` — authored value work vs integration/deploy/maintenance load.
+- `churn` / `changed_files` — size and breadth of change.
+- `risk_score` / `risky_units` — large, broad, sensitive, or low-test changes.
+- `traced_units` / `untraced_units` / `untraced_churn` — governance/traceability quality.
+- `direct_main_units` / `direct_main_delivery_units` / `pr_linked_units` — delivery lane and review coverage.
+- `test_coverage_units` / `sensitive_units` / `generated_units` / `low_confidence_units` — quality and attribution caveats.
+
+Run with optional plotting deps:
+
+```bash
+uv run --extra viz python skills/delivery-insights/scripts/temporal_heatmap.py \
+  --org Eve-World-Platform --repo coto-joy --preset author-day \
+  --output output/visualizations/coto-joy-author-day.png
+```
+
+For one-off bespoke visuals, keep generated scripts and images under `output/<analysis-name>/` so they don't pollute the data-layer repo. Any production-worthy reusable helper belongs under `scripts/` and must cite the SQL view it uses.
 
 ## Provenance
 

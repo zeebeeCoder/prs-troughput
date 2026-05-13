@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 from datetime import datetime
 from pathlib import Path
@@ -312,7 +313,7 @@ def _build_parser():
     parser.add_argument('--print-skill', action='store_true',
                         help='Print the delivery-insights SKILL.md to stdout (pipe to ~/.claude/skills/delivery-insights/SKILL.md to install)')
     parser.add_argument('--print-skill-bundle', action='store_true',
-                        help='Print a self-extracting bash script that installs SKILL.md + INSTALL.md + VALIDATION.md + docs/ + views/ to a target dir (pipe to bash)')
+                        help='Print a self-extracting bash script that installs SKILL.md + INSTALL.md + VALIDATION.md + docs/ + views/ + scripts/ to a target dir (pipe to bash)')
     parser.add_argument('--format', choices=('table', 'json', 'csv'), default='table', help='Output format for --insight (default: table)')
     parser.add_argument('--validate-local', type=str, help='Read-only local Git repo path to compare against existing parquet data')
     parser.add_argument('--remote', type=str, default='origin', help='Remote name for --validate-local branch checks (default: origin)')
@@ -350,6 +351,7 @@ def _handle_print_skill_bundle():
       <target>/SKILL.md, INSTALL.md, VALIDATION.md
       <target>/docs/data-contract.md, docs/analysis-playbook.md
       <target>/views/*.sql
+      <target>/scripts/*.py and scripts/README.md
     """
     root = _repo_root()
     bundle_files: list[tuple[str, Path]] = []
@@ -371,6 +373,12 @@ def _handle_print_skill_bundle():
             if sql_path.suffix in (".sql", ".md"):
                 bundle_files.append((f"views/{sql_path.name}", sql_path))
 
+    scripts_dir = skill_dir / "scripts"
+    if scripts_dir.is_dir():
+        for script_path in sorted(scripts_dir.iterdir()):
+            if script_path.suffix in (".py", ".md"):
+                bundle_files.append((f"scripts/{script_path.name}", script_path))
+
     if not bundle_files:
         raise FileNotFoundError(
             f"No skill assets found under {root}. Run from a checkout of prs-troughput."
@@ -381,12 +389,12 @@ def _handle_print_skill_bundle():
     print("# Usage: bash this-script <target-dir>   (default: ~/.claude/skills/delivery-insights)")
     print("set -euo pipefail")
     print('TARGET="${1:-$HOME/.claude/skills/delivery-insights}"')
-    print('mkdir -p "$TARGET/docs" "$TARGET/views"')
+    print('mkdir -p "$TARGET/docs" "$TARGET/views" "$TARGET/scripts"')
     print('echo "Installing delivery-insights to $TARGET …"')
     print()
-    # Use a unique heredoc terminator to avoid collisions with file content.
-    # Generate a random-ish marker derived from the file count so it's deterministic.
-    marker = f"DELIVERY_INSIGHTS_EOF_{abs(hash(tuple(name for name, _ in bundle_files))) % 10**8}"
+    # Use a unique, deterministic heredoc terminator to avoid collisions with file content.
+    marker_seed = "\n".join(name for name, _ in bundle_files).encode()
+    marker = f"DELIVERY_INSIGHTS_EOF_{hashlib.sha256(marker_seed).hexdigest()[:12].upper()}"
     for rel_name, path in bundle_files:
         text = path.read_text()
         # Defensive: warn if the marker happens to appear in content.

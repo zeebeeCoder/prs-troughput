@@ -81,6 +81,31 @@ def test_apply_output_dir_uses_environment(monkeypatch):
     assert cli.OUTPUT_DIR == "/tmp/pr-metrics-lake"
 
 
+def test_print_skill_bundle_includes_scripts(tmp_path, monkeypatch, capsys):
+    skill_dir = tmp_path / "skills" / "delivery-insights"
+    docs_dir = tmp_path / "docs"
+    views_dir = tmp_path / "views"
+    scripts_dir = skill_dir / "scripts"
+    for directory in (skill_dir, docs_dir, views_dir, scripts_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("# Skill\n")
+    (skill_dir / "INSTALL.md").write_text("# Install\n")
+    (skill_dir / "VALIDATION.md").write_text("# Validation\n")
+    (docs_dir / "data-contract.md").write_text("# Contract\n")
+    (docs_dir / "analysis-playbook.md").write_text("# Playbook\n")
+    (views_dir / "setup.sql").write_text("SELECT 1;\n")
+    (scripts_dir / "temporal_heatmap.py").write_text("print('heatmap')\n")
+    (scripts_dir / "README.md").write_text("# Scripts\n")
+    monkeypatch.setattr(cli, "_repo_root", lambda: tmp_path)
+
+    cli._handle_print_skill_bundle()
+
+    output = capsys.readouterr().out
+    assert 'mkdir -p "$TARGET/docs" "$TARGET/views" "$TARGET/scripts"' in output
+    assert 'cat > "$TARGET/scripts/temporal_heatmap.py"' in output
+    assert "DELIVERY_INSIGHTS_EOF_" in output
+
+
 def test_select_repos_uses_explicit_repo_list():
     args = SimpleNamespace(repo="backend, frontend ,,", full_scan=False, days=14)
 

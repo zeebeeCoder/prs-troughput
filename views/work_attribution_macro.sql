@@ -32,7 +32,7 @@ WITH base AS (
     FROM commit_links WHERE branch IS NOT NULL
     GROUP BY sha
   ) cl_branches USING (sha)
-  WHERE c.org = $org AND c.repo = $repo
+  WHERE c.org = $org AND ($repo = '*' OR c.repo = $repo)
     AND cm.authored_at >= now() - INTERVAL ($days_back || ' day')
 ),
 embedding_label AS (
@@ -42,7 +42,7 @@ embedding_label AS (
     arg_max(category, score) AS top_emb_category,
     max(score) AS top_emb_score
   FROM semantic_categories_latest
-  WHERE org = $org AND repo = $repo
+  WHERE org = $org AND ($repo = '*' OR repo = $repo)
     AND unit_kind = 'commit' AND source = 'embedding'
     AND category IN ('feature','bug_fix','refactor','refactoring','test','test_coverage',
                      'agent_tooling','infra','chore','dependency','performance','docs')

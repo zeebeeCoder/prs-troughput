@@ -5,19 +5,50 @@ description: Use this skill when analyzing contributor performance, work attribu
 
 # Delivery Insights — methodology contract
 
-You are analyzing data collected by `prs-troughput`, a Git delivery ledger that produces parquet under `output/ledger/`. The data layer is rich (5 grains, 13 named insights, 6 attribution signals); the analytical edge — *how to look at this data* — lives in this skill plus the in-repo docs.
+You are analyzing data collected by `prs-troughput`, a Git delivery ledger that produces a local parquet data lake. By default the lake is under `output/` in the CLI working directory; users can centralize it with `--output-dir PATH` or `PR_METRICS_OUTPUT_DIR`. The data layer is rich (5 grains, 13 named insights, 6 attribution signals); the analytical edge — *how to look at this data* — lives in this skill plus the in-repo docs.
 
 **This is a prescriptive skill.** Improvising methodology silently miscounts contributors and produces leadership reports that look authoritative but are wrong. Follow the contract.
 
 ## Before you start
 
-1. Read `docs/data-contract.md` in the repo root for schema reference.
-2. Read `docs/analysis-playbook.md` in full for methodology — macro taxonomy, signal cascade, archetypes, reporting hygiene.
-3. Bootstrap your DuckDB session by running, in order:
+1. Resolve the data lake location. Use the user's explicit path if given; otherwise check `PR_METRICS_OUTPUT_DIR`; otherwise assume `output/` relative to the current repo. When asking the CLI to refresh, report, validate, or run insights against a centralized lake, pass the same path with `--output-dir PATH`.
+2. Read `docs/data-contract.md` in the repo root for schema reference.
+3. Read `docs/analysis-playbook.md` in full for methodology — macro taxonomy, signal cascade, archetypes, reporting hygiene.
+4. Bootstrap your DuckDB session by running, in order:
    - `views/setup.sql` (creates `*_latest` views)
    - `views/contributors.sql` (canonical author identity — extend the manual overrides for your repo if new collisions appear)
 
 If any of these files are missing, the data layer hasn't been set up — do not improvise replacements; tell the user.
+
+## Data lake location / CLI reuse
+
+The CLI default is local and cwd-relative:
+
+```bash
+uv run pr-metrics --org ORG --repo REPO --days 30
+# writes to ./output/
+```
+
+For reusable analysis across projects, centralize the lake:
+
+```bash
+uv run pr-metrics --org ORG --repo REPO --days 30 \
+  --include-ledger \
+  --output-dir ~/.local/share/pr-metrics
+
+uv run pr-metrics --org ORG --repo REPO --insight kinetics_weekly --days 30 \
+  --output-dir ~/.local/share/pr-metrics
+```
+
+Or make it the default for a shell/session:
+
+```bash
+export PR_METRICS_OUTPUT_DIR="$HOME/.local/share/pr-metrics"
+uv run pr-metrics --org ORG --repo REPO --days 30 --include-ledger
+uv run pr-metrics --org ORG --repo REPO --report --terminal
+```
+
+When running bespoke DuckDB/Python analysis outside the CLI, point setup/query code at the same lake root. The expected subdirectories under that root are `data/` and `ledger/`.
 
 ## Picking the right view for the question
 

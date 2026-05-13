@@ -51,6 +51,36 @@ def test_main_runs_named_insight(monkeypatch, capsys):
     assert "rendered json 42" in capsys.readouterr().out
 
 
+def test_main_uses_output_dir_argument_for_insights(tmp_path, monkeypatch, capsys):
+    seen = {}
+    lake_dir = tmp_path / "shared-lake"
+
+    def fake_run_insight(name, **kwargs):
+        seen.update(kwargs)
+        return pd.DataFrame([{"answer": 42}])
+
+    monkeypatch.setattr(cli, "OUTPUT_DIR", "output")
+    monkeypatch.setattr(cli, "run_insight", fake_run_insight)
+    monkeypatch.setattr(cli, "render_dataframe", lambda df, fmt: "rendered")
+    monkeypatch.setattr(sys, "argv", [
+        "pr-metrics", "--org", "Acme", "--insight", "active_repos", "--output-dir", str(lake_dir)
+    ])
+
+    cli.main()
+
+    assert seen["output_dir"] == str(lake_dir)
+    assert "rendered" in capsys.readouterr().out
+
+
+def test_apply_output_dir_uses_environment(monkeypatch):
+    monkeypatch.setattr(cli, "OUTPUT_DIR", "output")
+    monkeypatch.setenv("PR_METRICS_OUTPUT_DIR", "/tmp/pr-metrics-lake")
+
+    cli._apply_output_dir(SimpleNamespace(output_dir=None))
+
+    assert cli.OUTPUT_DIR == "/tmp/pr-metrics-lake"
+
+
 def test_select_repos_uses_explicit_repo_list():
     args = SimpleNamespace(repo="backend, frontend ,,", full_scan=False, days=14)
 

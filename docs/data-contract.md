@@ -6,7 +6,7 @@ This document describes the **canonical data layer** that outer agents (LLMs, no
 
 ## Layout
 
-All data is written under `output/`. Two roots:
+By default, data is written under `output/` relative to the CLI working directory. Use `--output-dir PATH` or `PR_METRICS_OUTPUT_DIR` to point multiple CLI runs at a shared lake. Two roots under that output directory:
 
 | Root | Grain | Notes |
 |---|---|---|

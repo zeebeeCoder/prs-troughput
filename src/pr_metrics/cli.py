@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -104,8 +105,8 @@ def _print_pr_collection_results(df, days):
 
 def _persist_pr_rows(df, pr_rows, org):
     """Persist PR rows to Hive partitions plus legacy CSV backup."""
-    Path(OUTPUT_DIR).mkdir(exist_ok=True)
-    Path(f"{OUTPUT_DIR}/data").mkdir(exist_ok=True)
+    Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+    Path(f"{OUTPUT_DIR}/data").mkdir(parents=True, exist_ok=True)
 
     sanitized_org = sanitize_org_name(org)
     write_to_hive(pr_rows, sanitized_org, base_dir=f"{OUTPUT_DIR}/data")
@@ -285,6 +286,8 @@ def _build_parser():
     parser.add_argument('--terminal', action='store_true', help='Generate terminal-friendly report with rich styling')
     parser.add_argument('--org', type=str, help='GitHub organization to analyze (overrides default)')
     parser.add_argument('--repo', type=str, help='Filter by repository name; collection accepts comma-separated names')
+    parser.add_argument('--output-dir', default=None,
+                        help='Directory for the local parquet data lake and CSV backups (default: PR_METRICS_OUTPUT_DIR or output)')
     parser.add_argument('--top-n', type=int, default=5, help='Number of top contributors to show individual weekly breakdowns (default: 5)')
     parser.add_argument('--include-ledger', action='store_true', help='Collect commits and branches in addition to PRs')
     parser.add_argument('--include-commits', action='store_true', help='Collect commit event ledger data from default branch, PR commit lists, and branch scans')
@@ -483,10 +486,17 @@ def _handle_collection(args, org):
     _collect_ledger(args, org, repos)
 
 
+def _apply_output_dir(args):
+    """Resolve and apply the process-wide output directory for this CLI invocation."""
+    global OUTPUT_DIR
+    OUTPUT_DIR = args.output_dir or os.getenv("PR_METRICS_OUTPUT_DIR") or OUTPUT_DIR
+
+
 def main(argv=None):
     """Main CLI entry point."""
     parser = _build_parser()
     args = parser.parse_args(argv)
+    _apply_output_dir(args)
 
     if args.list_insights:
         _handle_list_insights()

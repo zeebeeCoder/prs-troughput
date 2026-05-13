@@ -78,6 +78,10 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --classify-semanti
 uv run pr-metrics --org your-org --repo backend-api --days 30 --delivery-report
 uv run pr-metrics --org your-org --repo backend-api --days 30 --delivery-report --branch-active-days 14
 
+# Reuse a shared parquet lake outside the current working directory
+uv run pr-metrics --org your-org --days 30 --output-dir ~/.local/share/pr-metrics
+uv run pr-metrics --org your-org --report --terminal --output-dir ~/.local/share/pr-metrics
+
 # Run reusable DuckDB insight slices over the generated parquet lake
 uv run pr-metrics --list-insights
 uv run pr-metrics --org your-org --insight active_repos --days 90
@@ -96,6 +100,7 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --validate-local ~
 |--------|---------|-------------|
 | `--org ORG` | (required*) | GitHub organization to analyze |
 | `--repo REPO` | None | Filter by specific repository; collection accepts comma-separated names |
+| `--output-dir PATH` | `PR_METRICS_OUTPUT_DIR` or `output` | Directory for the local parquet data lake and CSV backups |
 | `--days DAYS` | 14 | Number of days back to analyze |
 | `--min-prs N` | 3 | Minimum PRs required to include repo |
 | `--full-scan` | False | Process all repos (slower) |
@@ -131,12 +136,14 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --validate-local ~
 
 ### Configuration
 
-Set default organization via environment variable:
+Set default organization and shared data lake location via environment variables:
 
 ```bash
 export PR_METRICS_ORG="my-org"
-uv run pr-metrics  # Uses my-org
-uv run pr-metrics --org another-org  # Override to another-org
+export PR_METRICS_OUTPUT_DIR="$HOME/.local/share/pr-metrics"
+uv run pr-metrics  # Uses my-org and the shared lake
+uv run pr-metrics --org another-org  # Override the org
+uv run pr-metrics --output-dir ./output  # Override the lake for one run
 ```
 
 ### 👥 Contributor Performance Reports

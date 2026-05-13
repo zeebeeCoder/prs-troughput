@@ -34,6 +34,7 @@ For one-off analysis, override the lake explicitly:
 ```bash
 uv run pr-metrics --org ORG --repo REPO --days 30 \
   --include-ledger \
+  --ledger-source hybrid \
   --output-dir ~/.local/share/pr-metrics/lake
 
 uv run pr-metrics --org ORG --repo REPO --insight kinetics_weekly --days 30 \
@@ -44,11 +45,29 @@ Or make it the default for a shell/session:
 
 ```bash
 export PR_METRICS_OUTPUT_DIR="$HOME/.local/share/pr-metrics/lake"
-uv run pr-metrics --org ORG --repo REPO --days 30 --include-ledger
+uv run pr-metrics --org ORG --repo REPO --days 30 --include-ledger --ledger-source hybrid
 uv run pr-metrics --org ORG --repo REPO --report --terminal
 ```
 
-When running bespoke DuckDB/Python analysis outside the CLI, point setup/query code at the same lake root. The expected subdirectories under that root are `data/` and `ledger/`.
+When running bespoke DuckDB/Python analysis outside the CLI, point setup/query code at the same lake root. The expected subdirectories under that root are `data/` and `ledger/`. Collection runs also write JSONL phase telemetry to `telemetry/runs/` by default; use it when explaining benchmark or freshness regressions.
+
+## Refreshing data / CLI defaults
+
+For fresh ledger data, prefer hybrid mode unless the user explicitly wants the legacy all-GitHub ledger path:
+
+```bash
+uv run pr-metrics --org ORG --repo REPO --days 30 \
+  --include-ledger \
+  --ledger-source hybrid
+```
+
+Operational notes:
+
+- `--ledger-source github` remains the default for backward compatibility, but it is slower for ledger-heavy runs.
+- Hybrid mode stores full `--no-checkout` clones under `${XDG_CACHE_HOME:-~/.cache}/pr-metrics/clones` unless `--cache-dir` / `PR_METRICS_CACHE_DIR` is set.
+- `pr-metrics cache du` reports cache footprint.
+- `pr-metrics cache prune --older-than 30d` previews by default; add `--yes` to delete.
+- Telemetry is on by default at `<lake>/telemetry/runs/<run_id>.jsonl`; pass `--no-telemetry` only for noise-sensitive local runs.
 
 ## Picking the right view for the question
 
@@ -100,7 +119,7 @@ Every output you produce MUST include:
 
 - ❌ Adding `LIMIT N` to a contributor list without a justification you can show the user. Use `views/active_contributors.sql` to enumerate everyone above an activity floor.
 - ❌ Inlining `CASE WHEN lower(author_name) IN (...)` for identity. Extend `views/contributors.sql`.
-- ❌ Reading raw parquet via `read_parquet('output/ledger/**/*.parquet')` without dedup. Use `*_latest` views.
+- ❌ Reading raw parquet via `read_parquet('<lake>/ledger/**/*.parquet')` without dedup. Use `*_latest` views.
 - ❌ Inventing macro categories. The taxonomy is in playbook §1; extend it via PR, not in the moment.
 - ❌ Reporting commit count alone. Always pair with impact — see playbook §5.
 - ❌ Naming individuals in a burnout-signal report. Frame as patterns; the leader will translate to names.

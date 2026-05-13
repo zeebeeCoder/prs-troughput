@@ -84,23 +84,37 @@ def extract_commits(
     remote: str = "origin",
     full_body: bool = False,
     stats: GitCommandStats | None = None,
+    telemetry=None,
+    org: str | None = None,
+    repo_name: str | None = None,
 ) -> list[dict]:
     """Extract default-branch commits and per-file churn via one git log pass."""
-    default_ref = default_branch_ref(repo, remote=remote, stats=stats)
+    span_fields = {"org": org, "repo": repo_name, "clone_path": str(repo)}
+    if telemetry:
+        with telemetry.span("local_git.default_branch_ref", **span_fields):
+            default_ref = default_branch_ref(repo, remote=remote, stats=stats)
+    else:
+        default_ref = default_branch_ref(repo, remote=remote, stats=stats)
     since_iso = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
-    output = _run_git(
-        repo,
-        [
-            "log",
-            default_ref,
-            f"--since={since_iso}",
-            "--first-parent",
-            "--format=%x1e%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%s%x1f%b",
-            "--numstat",
-        ],
-        stats,
-    )
+    log_args = [
+        "log",
+        default_ref,
+        f"--since={since_iso}",
+        "--first-parent",
+        "--format=%x1e%H%x1f%P%x1f%an%x1f%ae%x1f%aI%x1f%cn%x1f%ce%x1f%cI%x1f%s%x1f%b",
+        "--numstat",
+    ]
+    if telemetry:
+        with telemetry.span("local_git.git_log_numstat", **span_fields, default_ref=default_ref):
+            output = _run_git(repo, log_args, stats)
+    else:
+        output = _run_git(repo, log_args, stats)
     body_limit = None if full_body else 8192
+    if telemetry:
+        with telemetry.span("local_git.parse_commits", **span_fields):
+            commits = [_parse_commit_record(record, body_limit=body_limit) for record in output.split("\x1e") if record.strip()]
+        telemetry.record("local_git.extract_commits.rows", org=org, repo=repo_name, rows=len(commits), status="ok")
+        return commits
     return [_parse_commit_record(record, body_limit=body_limit) for record in output.split("\x1e") if record.strip()]
 
 
@@ -110,10 +124,27 @@ def extract_branches(
     open_pr_branch_map: dict[str, dict],
     remote: str = "origin",
     stats: GitCommandStats | None = None,
+    telemetry=None,
+    org: str | None = None,
+    repo_name: str | None = None,
 ) -> list[dict]:
     """Extract branch rows for branches that have open PRs."""
     if not open_pr_branch_map:
         return []
+    span_fields = {"org": org, "repo": repo_name, "clone_path": str(repo), "open_pr_branches": len(open_pr_branch_map)}
+    if telemetry:
+        with telemetry.span("local_git.extract_branches", **span_fields):
+            return _extract_branches_impl(repo, open_pr_branch_map=open_pr_branch_map, remote=remote, stats=stats)
+    return _extract_branches_impl(repo, open_pr_branch_map=open_pr_branch_map, remote=remote, stats=stats)
+
+
+def _extract_branches_impl(
+    repo: Path,
+    *,
+    open_pr_branch_map: dict[str, dict],
+    remote: str = "origin",
+    stats: GitCommandStats | None = None,
+) -> list[dict]:
     default_ref = default_branch_ref(repo, remote=remote, stats=stats)
     default_branch = default_ref.rsplit("/", 1)[-1]
     default_head = _run_git(repo, ["rev-parse", default_ref], stats).strip()

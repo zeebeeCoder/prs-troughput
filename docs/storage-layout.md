@@ -7,7 +7,17 @@
 | Data lake | `${XDG_DATA_HOME:-~/.local/share}/pr-metrics/lake` | `--output-dir` / `PR_METRICS_OUTPUT_DIR` |
 | Clone cache | `${XDG_CACHE_HOME:-~/.cache}/pr-metrics/clones/<org>/<repo>` | `--cache-dir` / `PR_METRICS_CACHE_DIR` |
 
-The data lake contains regenerated parquet/CSV artifacts. The clone cache contains tool-managed git clones used by `--ledger-source hybrid`.
+The data lake contains regenerated parquet/CSV artifacts and collection telemetry. The clone cache contains tool-managed git clones used by `--ledger-source hybrid`.
+
+## Telemetry layout
+
+Collection runs write JSONL phase telemetry by default:
+
+```text
+<lake>/telemetry/runs/<run_id>.jsonl
+```
+
+Each event includes `run_id`, timestamp, `phase`, `elapsed_ms`, `status`, and any phase-specific fields such as `org`, `repo`, `rows`, `clone_path`, or `default_ref`. Use `--no-telemetry` to opt out for a run.
 
 ## Hybrid clone lifecycle
 

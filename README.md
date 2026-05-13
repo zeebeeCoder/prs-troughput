@@ -69,6 +69,9 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger -
 uv run pr-metrics cache list
 uv run pr-metrics cache du
 
+# Collection runs write phase telemetry to <lake>/telemetry/runs/<run_id>.jsonl by default
+uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger --ledger-source hybrid --no-telemetry  # opt out
+
 # Bound the legacy GitHub commit event ledger collection across default branch, PR commits, and branch commits
 uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger \
   --commit-limit 40 --pr-limit 50 --pr-commit-limit 100 --branch-limit 50 --branch-commit-limit 100
@@ -118,6 +121,7 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --validate-local ~
 | `--max-concurrency N` | `min(8, repo_count)` | Bounded concurrent repo extraction in hybrid mode |
 | `--full-body` | False | Preserve full commit bodies in hybrid mode; default truncates to 8 KiB |
 | `--allow-stale` | False | Allow hybrid extraction when remote refs are older than the requested `--days` window |
+| `--no-telemetry` | False | Disable default JSONL phase telemetry under `<lake>/telemetry/runs/` |
 | `--include-commits` | False | Collect commit event ledger data from default branch, PR commit lists, and branch scans |
 | `--include-branches` | False | Collect remote branch snapshots only |
 | `--commit-limit N` | 100 | Max default-branch commits to collect per repo |

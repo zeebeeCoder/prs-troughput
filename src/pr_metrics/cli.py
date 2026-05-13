@@ -8,6 +8,7 @@ import hashlib
 import os
 import sys
 import time
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -46,11 +47,23 @@ from .reports import (
 )
 from .semantic import classify_delivery_lake_rows, embed_semantic_units, semantic_units_from_delivery_lake_rows
 from .storage import write_rows_to_hive, write_to_hive
+from .telemetry import RunTelemetry
 from .utils import resolve_org, sanitize_org_name
 from .validation import validate_local_repo
 
 
 OUTPUT_DIR = str(resolve_data_lake_dir())
+
+
+def _telemetry_span(telemetry, phase, **fields):
+    """Return a telemetry span or a no-op context manager."""
+    return telemetry.span(phase, **fields) if telemetry else nullcontext()
+
+
+def _telemetry_record(telemetry, phase, **fields):
+    """Record a telemetry event when telemetry is enabled."""
+    if telemetry:
+        telemetry.record(phase, **fields)
 
 
 def _select_repos(args, org):
@@ -70,10 +83,13 @@ def _select_repos(args, org):
 def _fetch_pr_data(args, org, repos):
     """Fetch raw PR data for each selected repository."""
     all_prs_data = {}
+    telemetry = getattr(args, "_telemetry", None)
     for i, repo in enumerate(repos, 1):
         repo_name = repo['name']
         print(f"  {i}/{len(repos)} PRs: {repo_name}")
-        prs = get_repo_prs(org, repo_name, args.days)
+        with _telemetry_span(telemetry, "github.get_repo_prs", org=org, repo=repo_name):
+            prs = get_repo_prs(org, repo_name, args.days)
+        _telemetry_record(telemetry, "github.get_repo_prs.rows", org=org, repo=repo_name, rows=len(prs), status="ok")
         if prs:
             all_prs_data[repo_name] = prs
     return all_prs_data
@@ -113,13 +129,14 @@ def _print_pr_collection_results(df, days):
     print(f"   Top authors: {dict(df['author'].value_counts().head(5))}")
 
 
-def _persist_pr_rows(df, pr_rows, org):
+def _persist_pr_rows(df, pr_rows, org, telemetry=None):
     """Persist PR rows to Hive partitions plus legacy CSV backup."""
     Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
     Path(f"{OUTPUT_DIR}/data").mkdir(parents=True, exist_ok=True)
 
     sanitized_org = sanitize_org_name(org)
-    write_to_hive(pr_rows, sanitized_org, base_dir=f"{OUTPUT_DIR}/data")
+    with _telemetry_span(telemetry, "write_hive.pr_data", org=org, rows=len(pr_rows)):
+        write_to_hive(pr_rows, sanitized_org, base_dir=f"{OUTPUT_DIR}/data")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_file = f"{OUTPUT_DIR}/pr_data_{sanitized_org}_{timestamp}.csv"
@@ -142,7 +159,7 @@ def _collect_prs(args, org, repos):
 
     pr_rows = df.to_dict('records')
     _print_pr_collection_results(df, args.days)
-    _persist_pr_rows(df, pr_rows, org)
+    _persist_pr_rows(df, pr_rows, org, telemetry=getattr(args, "_telemetry", None))
     return pr_rows
 
 
@@ -200,18 +217,36 @@ def _collect_commit_ledger_github(args, org, repos):
 
 def _extract_local_commits_for_repo(args, org, repo_name, cache, stats):
     """Ensure a cached clone and extract local commit facts for one repo."""
-    clone = cache.ensure_clone(org, repo_name)
-    local_git.ensure_fresh_refs(
-        clone,
-        args.days,
-        allow_stale=getattr(args, "allow_stale", False),
-        stats=stats,
+    telemetry = getattr(args, "_telemetry", None)
+    cloned_before = cache.cloned_count
+    fetched_before = cache.fetched_count
+    with _telemetry_span(telemetry, "clone_cache.ensure_clone", org=org, repo=repo_name):
+        clone = cache.ensure_clone(org, repo_name)
+    _telemetry_record(
+        telemetry,
+        "clone_cache.ensure_clone.result",
+        org=org,
+        repo=repo_name,
+        clone_path=str(clone),
+        cloned=cache.cloned_count - cloned_before,
+        fetched=cache.fetched_count - fetched_before,
+        status="ok",
     )
+    with _telemetry_span(telemetry, "local_git.ensure_fresh_refs", org=org, repo=repo_name, clone_path=str(clone)):
+        local_git.ensure_fresh_refs(
+            clone,
+            args.days,
+            allow_stale=getattr(args, "allow_stale", False),
+            stats=stats,
+        )
     return repo_name, local_git.extract_commits(
         clone,
         days_back=args.days,
         full_body=getattr(args, "full_body", False),
         stats=stats,
+        telemetry=telemetry,
+        org=org,
+        repo_name=repo_name,
     )
 
 
@@ -236,6 +271,12 @@ def _collect_commit_ledger_hybrid(args, org, repos):
     return all_commits_data
 
 
+def _write_rows_with_telemetry(rows, base_dir, table_name, telemetry=None):
+    """Write Hive rows and record writer timing/counts."""
+    with _telemetry_span(telemetry, f"write_hive.{table_name}", rows=len(rows), base_dir=base_dir):
+        write_rows_to_hive(rows, base_dir, table_name=table_name)
+
+
 def _collect_commit_ledger(args, org, repos):
     """Collect and persist commit ledger rows across configured sources."""
     if getattr(args, "ledger_source", "github") == "hybrid":
@@ -243,25 +284,51 @@ def _collect_commit_ledger(args, org, repos):
     else:
         all_commits_data = _collect_commit_ledger_github(args, org, repos)
 
-    commit_rows, file_rows, link_rows, delivery_rows = process_commit_ledger_to_rows(all_commits_data, org)
-    write_rows_to_hive(commit_rows, f"{OUTPUT_DIR}/ledger/commits", table_name="commits")
-    write_rows_to_hive(link_rows, f"{OUTPUT_DIR}/ledger/commit_links", table_name="commit_links")
-    write_rows_to_hive(delivery_rows, f"{OUTPUT_DIR}/ledger/delivery_events", table_name="delivery_events")
+    telemetry = getattr(args, "_telemetry", None)
+    with _telemetry_span(telemetry, "processor.process_commit_ledger", org=org, repos=len(all_commits_data)):
+        commit_rows, file_rows, link_rows, delivery_rows = process_commit_ledger_to_rows(all_commits_data, org)
+    _write_rows_with_telemetry(commit_rows, f"{OUTPUT_DIR}/ledger/commits", "commits", telemetry)
+    _write_rows_with_telemetry(link_rows, f"{OUTPUT_DIR}/ledger/commit_links", "commit_links", telemetry)
+    _write_rows_with_telemetry(delivery_rows, f"{OUTPUT_DIR}/ledger/delivery_events", "delivery_events", telemetry)
     if not args.skip_commit_files:
-        write_rows_to_hive(file_rows, f"{OUTPUT_DIR}/ledger/commit_files", table_name="commit_files")
+        _write_rows_with_telemetry(file_rows, f"{OUTPUT_DIR}/ledger/commit_files", "commit_files", telemetry)
 
 
 def _extract_local_branches_for_repo(args, org, repo_name, cache, stats):
     """Ensure a cached clone and extract open-PR branch facts for one repo."""
-    clone = cache.ensure_clone(org, repo_name)
-    open_prs = get_open_pr_branch_map(org, repo_name, limit=getattr(args, "pr_limit", 100))
-    local_git.ensure_fresh_refs(
-        clone,
-        args.days,
-        allow_stale=getattr(args, "allow_stale", False),
-        stats=stats,
+    telemetry = getattr(args, "_telemetry", None)
+    cloned_before = cache.cloned_count
+    fetched_before = cache.fetched_count
+    with _telemetry_span(telemetry, "clone_cache.ensure_clone", org=org, repo=repo_name):
+        clone = cache.ensure_clone(org, repo_name)
+    _telemetry_record(
+        telemetry,
+        "clone_cache.ensure_clone.result",
+        org=org,
+        repo=repo_name,
+        clone_path=str(clone),
+        cloned=cache.cloned_count - cloned_before,
+        fetched=cache.fetched_count - fetched_before,
+        status="ok",
     )
-    return repo_name, local_git.extract_branches(clone, open_pr_branch_map=open_prs, stats=stats)
+    with _telemetry_span(telemetry, "github.get_open_pr_branch_map", org=org, repo=repo_name):
+        open_prs = get_open_pr_branch_map(org, repo_name, limit=getattr(args, "pr_limit", 100))
+    _telemetry_record(telemetry, "github.get_open_pr_branch_map.rows", org=org, repo=repo_name, rows=len(open_prs), status="ok")
+    with _telemetry_span(telemetry, "local_git.ensure_fresh_refs", org=org, repo=repo_name, clone_path=str(clone)):
+        local_git.ensure_fresh_refs(
+            clone,
+            args.days,
+            allow_stale=getattr(args, "allow_stale", False),
+            stats=stats,
+        )
+    return repo_name, local_git.extract_branches(
+        clone,
+        open_pr_branch_map=open_prs,
+        stats=stats,
+        telemetry=telemetry,
+        org=org,
+        repo_name=repo_name,
+    )
 
 
 def _collect_branch_ledger_hybrid(args, org, repos):
@@ -297,8 +364,10 @@ def _collect_branch_ledger(args, org, repos):
             if branches:
                 all_branch_data[repo_name] = branches
 
-    branch_rows = process_branches_to_rows(all_branch_data, org)
-    write_rows_to_hive(branch_rows, f"{OUTPUT_DIR}/ledger/branches", table_name="branches")
+    telemetry = getattr(args, "_telemetry", None)
+    with _telemetry_span(telemetry, "processor.process_branches", org=org, repos=len(all_branch_data)):
+        branch_rows = process_branches_to_rows(all_branch_data, org)
+    _write_rows_with_telemetry(branch_rows, f"{OUTPUT_DIR}/ledger/branches", "branches", telemetry)
 
 
 def _view_records(con, available, view_name):
@@ -383,7 +452,8 @@ def _collect_ledger(args, org, repos):
     if include_branches:
         _collect_branch_ledger(args, org, repos)
     if include_semantics:
-        _classify_semantics(args, org)
+        with _telemetry_span(getattr(args, "_telemetry", None), "classify_semantics", org=org):
+            _classify_semantics(args, org)
     _print_extraction_summary(args, started)
 
 
@@ -392,6 +462,7 @@ def _print_extraction_summary(args, started):
     elapsed = time.monotonic() - started
     cache = getattr(args, "_clone_cache", None)
     stats = getattr(args, "_git_stats", None)
+    telemetry = getattr(args, "_telemetry", None)
     cloned = cache.cloned_count if cache else 0
     fetched = cache.fetched_count if cache else 0
     git_commands = stats.commands if stats else 0
@@ -400,6 +471,10 @@ def _print_extraction_summary(args, started):
         f"elapsed={elapsed:.1f}s gh_calls={get_gh_call_count()} "
         f"local_git_commands={git_commands} cloned={cloned} fetched={fetched}"
     )
+    if telemetry and telemetry.enabled:
+        print(f"🧭 Telemetry written: {telemetry.path}")
+        for row in telemetry.summary()[:8]:
+            print(f"   {row['phase']}: {float(row['elapsed_ms']) / 1000:.1f}s across {row['count']} event(s)")
 
 
 
@@ -423,6 +498,8 @@ def _build_parser():
     parser.add_argument('--max-concurrency', type=int, default=None, help='Maximum concurrent repo extractions for hybrid mode (default: min(8, repo_count))')
     parser.add_argument('--full-body', action='store_true', help='Preserve full commit bodies in hybrid mode (default truncates to 8 KiB)')
     parser.add_argument('--allow-stale', action='store_true', help='Allow hybrid extraction when remote refs are older than the --days window')
+    parser.add_argument('--no-telemetry', dest='telemetry', action='store_false', help='Disable JSONL phase telemetry for collection runs')
+    parser.set_defaults(telemetry=True)
     parser.add_argument('--include-commits', action='store_true', help='Collect commit event ledger data from default branch, PR commit lists, and branch scans')
     parser.add_argument('--include-branches', action='store_true', help='Collect remote branch snapshot data')
     parser.add_argument('--commit-limit', type=int, default=100, help='Max default-branch commits to collect per repo (default: 100)')
@@ -616,13 +693,18 @@ def _handle_pr_report(args, org):
 
 def _handle_collection(args, org):
     """Collect fresh PR and optional ledger data."""
+    args._telemetry = RunTelemetry(OUTPUT_DIR, enabled=getattr(args, "telemetry", True))
     print(f"🔍 Collecting PR metrics for {org} (last {args.days} days)")
-    repos = _select_repos(args, org)
+    print(f"🧭 Telemetry: {args._telemetry.path}")
+    with args._telemetry.span("select_repos", org=org, days=args.days):
+        repos = _select_repos(args, org)
+    _telemetry_record(args._telemetry, "select_repos.rows", org=org, rows=len(repos), status="ok")
     if not repos:
         print("No repositories found")
         return
 
-    _collect_prs(args, org, repos)
+    with args._telemetry.span("collect_prs", org=org, repos=len(repos)):
+        _collect_prs(args, org, repos)
     _collect_ledger(args, org, repos)
 
 

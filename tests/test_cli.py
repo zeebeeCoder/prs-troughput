@@ -185,7 +185,7 @@ def test_main_collection_delegates_to_collectors(monkeypatch):
     monkeypatch.setattr(cli, "_select_repos", lambda args, org: repos)
     monkeypatch.setattr(cli, "_collect_prs", lambda args, org, selected: calls.append(("prs", org, selected)))
     monkeypatch.setattr(cli, "_collect_ledger", lambda args, org, selected: calls.append(("ledger", org, selected)))
-    monkeypatch.setattr(sys, "argv", ["pr-metrics", "--org", "Acme", "--repo", "backend"])
+    monkeypatch.setattr(sys, "argv", ["pr-metrics", "--org", "Acme", "--repo", "backend", "--no-telemetry"])
 
     cli.main()
 

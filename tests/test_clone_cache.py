@@ -6,13 +6,15 @@ from pr_metrics.clone_cache import CloneCache, CloneLockError
 from tests.fixtures.git_fixtures import make_bare_remote
 
 
-def test_clone_cache_clones_blobless_no_checkout_and_fetches_existing(tmp_path):
+def test_clone_cache_clones_full_no_checkout_and_fetches_existing(tmp_path):
     remote = make_bare_remote(tmp_path)
     cache = CloneCache(tmp_path / "cache")
 
     clone = cache.ensure_clone("Acme", "backend", remote_url=f"file://{remote}")
 
     assert (clone / ".git").exists()
+    assert "partialclonefilter" not in (clone / ".git" / "config").read_text()
+    assert not (clone / "README.md").exists()  # --no-checkout keeps the worktree empty
     assert cache.cloned_count == 1
     assert cache.fetched_count == 0
     assert (clone / ".pr-metrics.access").exists()
@@ -51,10 +53,27 @@ def test_clone_cache_prunes_by_access_age(tmp_path):
     clone = cache.ensure_clone("Acme", "backend", remote_url=f"file://{remote}")
     (clone / ".pr-metrics.access").write_text("2000-01-01T00:00:00+00:00")
 
+    preview = cache.prune(timedelta(days=1), dry_run=True)
+    assert preview == [clone]
+    assert clone.exists()
+
     removed = cache.prune(timedelta(days=1))
 
     assert removed == [clone]
     assert not clone.exists()
+
+
+def test_locked_clone_holds_lock_until_context_exits(tmp_path):
+    remote = make_bare_remote(tmp_path)
+    cache = CloneCache(tmp_path / "cache")
+    clone = cache.ensure_clone("Acme", "backend", remote_url=f"file://{remote}")
+
+    with cache.locked_clone("Acme", "backend", remote_url=f"file://{remote}") as locked:
+        assert locked == clone
+        assert (clone / ".pr-metrics.lock").exists()
+        assert (clone / ".git").exists()
+
+    assert not (clone / ".pr-metrics.lock").exists()
 
 
 def test_clone_cache_lock_contention_times_out(tmp_path):

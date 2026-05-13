@@ -6,7 +6,9 @@ import os
 import shutil
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -74,24 +76,40 @@ class CloneCache:
 
     def ensure_clone(self, org: str, repo: str, *, remote_url: str | None = None) -> Path:
         """Clone a missing repo or fetch an existing cache-owned clone."""
+        with self.locked_clone(org, repo, remote_url=remote_url) as path:
+            return path
+
+    @contextmanager
+    def locked_clone(self, org: str, repo: str, *, remote_url: str | None = None) -> Iterator[Path]:
+        """Yield an ensured clone while holding its cache lock.
+
+        Keeping the lock through extraction prevents another process/thread from
+        mutating the same clone while read-only git commands are walking refs and
+        history.
+        """
         path = self.clone_path(org, repo)
         remote_url = remote_url or f"https://github.com/{org}/{repo}.git"
         lock_path = path / ".pr-metrics.lock" if path.exists() else path.parent / f".{repo}.pr-metrics.lock"
         with _CloneLock(lock_path, timeout=self.lock_timeout):
-            if (path / ".git").exists():
-                if path not in self._fetched_this_run:
-                    self._run(["git", "-C", str(path), "fetch", "--prune", "origin"])
-                    self.fetched_count += 1
-                    self._fetched_this_run.add(path)
-            else:
-                if path.exists() and any(child.name != ".pr-metrics.lock" for child in path.iterdir()):
-                    raise RuntimeError(f"Cache path exists but is not a git clone: {path}")
-                path.parent.mkdir(parents=True, exist_ok=True)
-                self._run(["git", "clone", "--filter=blob:none", "--no-checkout", remote_url, str(path)])
-                self.cloned_count += 1
-                self._fetched_this_run.add(path)
+            self._ensure_clone_locked(path, remote_url)
             self._touch_access(path)
-        return path
+            yield path
+
+    def _ensure_clone_locked(self, path: Path, remote_url: str) -> None:
+        """Clone/fetch path; caller must hold the clone lock."""
+        if (path / ".git").exists():
+            if path not in self._fetched_this_run:
+                self._run(["git", "-C", str(path), "fetch", "--prune", "origin"])
+                self.fetched_count += 1
+                self._fetched_this_run.add(path)
+            return
+
+        if path.exists() and any(child.name != ".pr-metrics.lock" for child in path.iterdir()):
+            raise RuntimeError(f"Cache path exists but is not a git clone: {path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._run(["git", "clone", "--no-checkout", remote_url, str(path)])
+        self.cloned_count += 1
+        self._fetched_this_run.add(path)
 
     def iter_cached_clones(self) -> list[CachedClone]:
         """Return cached clone metadata."""
@@ -115,14 +133,18 @@ class CloneCache:
         """Return total cache disk usage in bytes."""
         return sum(clone.bytes_used for clone in self.iter_cached_clones())
 
-    def prune(self, older_than: timedelta) -> list[Path]:
-        """Remove clones whose access marker is older than the cutoff."""
+    def prune(self, older_than: timedelta, *, dry_run: bool = False) -> list[Path]:
+        """Remove clones whose access marker is older than the cutoff.
+
+        When dry_run is true, return matching clones without deleting them.
+        """
         cutoff = datetime.now(timezone.utc) - older_than
         removed: list[Path] = []
         for clone in self.iter_cached_clones():
             accessed = clone.last_accessed or datetime.fromtimestamp(clone.path.stat().st_mtime, tz=timezone.utc)
             if accessed < cutoff:
-                shutil.rmtree(clone.path)
+                if not dry_run:
+                    shutil.rmtree(clone.path)
                 removed.append(clone.path)
         return removed
 

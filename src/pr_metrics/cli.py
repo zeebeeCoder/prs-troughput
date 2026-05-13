@@ -220,34 +220,35 @@ def _extract_local_commits_for_repo(args, org, repo_name, cache, stats):
     telemetry = getattr(args, "_telemetry", None)
     cloned_before = cache.cloned_count
     fetched_before = cache.fetched_count
-    with _telemetry_span(telemetry, "clone_cache.ensure_clone", org=org, repo=repo_name):
-        clone = cache.ensure_clone(org, repo_name)
-    _telemetry_record(
-        telemetry,
-        "clone_cache.ensure_clone.result",
-        org=org,
-        repo=repo_name,
-        clone_path=str(clone),
-        cloned=cache.cloned_count - cloned_before,
-        fetched=cache.fetched_count - fetched_before,
-        status="ok",
-    )
-    with _telemetry_span(telemetry, "local_git.ensure_fresh_refs", org=org, repo=repo_name, clone_path=str(clone)):
-        local_git.ensure_fresh_refs(
-            clone,
-            args.days,
-            allow_stale=getattr(args, "allow_stale", False),
-            stats=stats,
-        )
-    return repo_name, local_git.extract_commits(
-        clone,
-        days_back=args.days,
-        full_body=getattr(args, "full_body", False),
-        stats=stats,
-        telemetry=telemetry,
-        org=org,
-        repo_name=repo_name,
-    )
+    with _telemetry_span(telemetry, "clone_cache.locked_clone", org=org, repo=repo_name):
+        with cache.locked_clone(org, repo_name) as clone:
+            _telemetry_record(
+                telemetry,
+                "clone_cache.ensure_clone.result",
+                org=org,
+                repo=repo_name,
+                clone_path=str(clone),
+                cloned=cache.cloned_count - cloned_before,
+                fetched=cache.fetched_count - fetched_before,
+                status="ok",
+            )
+            with _telemetry_span(telemetry, "local_git.ensure_fresh_refs", org=org, repo=repo_name, clone_path=str(clone)):
+                local_git.ensure_fresh_refs(
+                    clone,
+                    args.days,
+                    allow_stale=getattr(args, "allow_stale", False),
+                    stats=stats,
+                )
+            commits = local_git.extract_commits(
+                clone,
+                days_back=args.days,
+                full_body=getattr(args, "full_body", False),
+                stats=stats,
+                telemetry=telemetry,
+                org=org,
+                repo_name=repo_name,
+            )
+    return repo_name, commits
 
 
 def _collect_commit_ledger_hybrid(args, org, repos):
@@ -299,36 +300,37 @@ def _extract_local_branches_for_repo(args, org, repo_name, cache, stats):
     telemetry = getattr(args, "_telemetry", None)
     cloned_before = cache.cloned_count
     fetched_before = cache.fetched_count
-    with _telemetry_span(telemetry, "clone_cache.ensure_clone", org=org, repo=repo_name):
-        clone = cache.ensure_clone(org, repo_name)
-    _telemetry_record(
-        telemetry,
-        "clone_cache.ensure_clone.result",
-        org=org,
-        repo=repo_name,
-        clone_path=str(clone),
-        cloned=cache.cloned_count - cloned_before,
-        fetched=cache.fetched_count - fetched_before,
-        status="ok",
-    )
-    with _telemetry_span(telemetry, "github.get_open_pr_branch_map", org=org, repo=repo_name):
-        open_prs = get_open_pr_branch_map(org, repo_name, limit=getattr(args, "pr_limit", 100))
-    _telemetry_record(telemetry, "github.get_open_pr_branch_map.rows", org=org, repo=repo_name, rows=len(open_prs), status="ok")
-    with _telemetry_span(telemetry, "local_git.ensure_fresh_refs", org=org, repo=repo_name, clone_path=str(clone)):
-        local_git.ensure_fresh_refs(
-            clone,
-            args.days,
-            allow_stale=getattr(args, "allow_stale", False),
-            stats=stats,
-        )
-    return repo_name, local_git.extract_branches(
-        clone,
-        open_pr_branch_map=open_prs,
-        stats=stats,
-        telemetry=telemetry,
-        org=org,
-        repo_name=repo_name,
-    )
+    with _telemetry_span(telemetry, "clone_cache.locked_clone", org=org, repo=repo_name):
+        with cache.locked_clone(org, repo_name) as clone:
+            _telemetry_record(
+                telemetry,
+                "clone_cache.ensure_clone.result",
+                org=org,
+                repo=repo_name,
+                clone_path=str(clone),
+                cloned=cache.cloned_count - cloned_before,
+                fetched=cache.fetched_count - fetched_before,
+                status="ok",
+            )
+            with _telemetry_span(telemetry, "github.get_open_pr_branch_map", org=org, repo=repo_name):
+                open_prs = get_open_pr_branch_map(org, repo_name, limit=getattr(args, "pr_limit", 100))
+            _telemetry_record(telemetry, "github.get_open_pr_branch_map.rows", org=org, repo=repo_name, rows=len(open_prs), status="ok")
+            with _telemetry_span(telemetry, "local_git.ensure_fresh_refs", org=org, repo=repo_name, clone_path=str(clone)):
+                local_git.ensure_fresh_refs(
+                    clone,
+                    args.days,
+                    allow_stale=getattr(args, "allow_stale", False),
+                    stats=stats,
+                )
+            branches = local_git.extract_branches(
+                clone,
+                open_pr_branch_map=open_prs,
+                stats=stats,
+                telemetry=telemetry,
+                org=org,
+                repo_name=repo_name,
+            )
+    return repo_name, branches
 
 
 def _collect_branch_ledger_hybrid(args, org, repos):
@@ -742,8 +744,10 @@ def _build_cache_parser():
     sub = parser.add_subparsers(dest="cache_command", required=True)
     sub.add_parser("list", parents=[cache_parent], help="List cached clones")
     sub.add_parser("du", parents=[cache_parent], help="Show cache disk usage")
-    prune = sub.add_parser("prune", parents=[cache_parent], help="Remove clones older than an age, e.g. 30d")
+    prune = sub.add_parser("prune", parents=[cache_parent], help="Preview/remove clones older than an age, e.g. 30d")
     prune.add_argument("--older-than", required=True)
+    prune.add_argument("--dry-run", action="store_true", help="Preview matching clones without deleting them")
+    prune.add_argument("--yes", action="store_true", help="Actually delete matching clones; prune previews by default")
     clear = sub.add_parser("clear", parents=[cache_parent], help="Clear all cached clones or a subset")
     clear.add_argument("--org", default=None)
     clear.add_argument("--repo", default=None)
@@ -762,10 +766,15 @@ def _handle_cache_command(argv):
     elif args.cache_command == "du":
         print(f"{_format_bytes(cache.du())}\t{cache.cache_root}")
     elif args.cache_command == "prune":
-        removed = cache.prune(_parse_age(args.older_than))
+        dry_run = args.dry_run or not args.yes
+        removed = cache.prune(_parse_age(args.older_than), dry_run=dry_run)
+        action = "would-remove" if dry_run else "removed"
         for path in removed:
-            print(f"removed\t{path}")
-        print(f"Removed {len(removed)} clone(s)")
+            print(f"{action}\t{path}")
+        if dry_run:
+            print(f"Would remove {len(removed)} clone(s). Re-run with --yes to delete.")
+        else:
+            print(f"Removed {len(removed)} clone(s)")
     elif args.cache_command == "clear":
         removed = cache.clear(org=args.org, repo=args.repo)
         for path in removed:

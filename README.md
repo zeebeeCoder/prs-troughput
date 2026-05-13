@@ -68,6 +68,8 @@ uv run pr-metrics --org your-org --repo coto_joy,coto_backend --days 30 --includ
 uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger --ledger-source hybrid
 uv run pr-metrics cache list
 uv run pr-metrics cache du
+uv run pr-metrics cache prune --older-than 30d       # preview by default
+uv run pr-metrics cache prune --older-than 30d --yes # delete matches
 
 # Collection runs write phase telemetry to <lake>/telemetry/runs/<run_id>.jsonl by default
 uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger --ledger-source hybrid --no-telemetry  # opt out
@@ -161,7 +163,7 @@ uv run pr-metrics --org another-org  # Override the org
 uv run pr-metrics --output-dir ./output  # Override the lake for one run
 ```
 
-Hybrid mode manages clone storage with `uv run pr-metrics cache list|du|prune|clear`.
+Hybrid mode manages clone storage with `uv run pr-metrics cache list|du|prune|clear`. `cache prune` previews by default; pass `--yes` to delete matching clones.
 
 ### 👥 Contributor Performance Reports
 

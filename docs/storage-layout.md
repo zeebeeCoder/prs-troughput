@@ -21,10 +21,10 @@ Each event includes `run_id`, timestamp, `phase`, `elapsed_ms`, `status`, and an
 
 ## Hybrid clone lifecycle
 
-- First encounter: `git clone --filter=blob:none --no-checkout` into the clone cache.
+- First encounter: `git clone --no-checkout` into the clone cache. Hybrid extraction intentionally uses full clones because `git log --numstat` against blobless partial clones can trigger slow on-demand promisor fetches.
 - Later runs: `git fetch --prune origin` before extraction.
 - One `CloneCache` instance remembers clones fetched in the current process to avoid double-fetching when commits and branches are collected together.
-- Cache mutations are protected by a per-clone lock.
+- Cache mutations and extraction are protected by a per-clone lock.
 - Access time is tracked with `.pr-metrics.access` for explicit pruning.
 
 ## Cache management
@@ -32,7 +32,8 @@ Each event includes `run_id`, timestamp, `phase`, `elapsed_ms`, `status`, and an
 ```bash
 uv run pr-metrics cache list
 uv run pr-metrics cache du
-uv run pr-metrics cache prune --older-than 30d
+uv run pr-metrics cache prune --older-than 30d          # preview by default
+uv run pr-metrics cache prune --older-than 30d --yes    # delete matches
 uv run pr-metrics cache clear --org my-org
 ```
 

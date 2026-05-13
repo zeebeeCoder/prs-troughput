@@ -1,7 +1,10 @@
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 from pr_metrics import cli
+from pr_metrics.clone_cache import CloneCache
+from tests.fixtures.git_fixtures import make_bare_remote
 
 
 class FakeCache:
@@ -12,6 +15,10 @@ class FakeCache:
 
     def ensure_clone(self, org, repo):
         return self.cache_root / org / repo
+
+    @contextmanager
+    def locked_clone(self, org, repo):
+        yield self.ensure_clone(org, repo)
 
 
 def test_collect_commit_ledger_routes_hybrid_to_local_git(tmp_path, monkeypatch):
@@ -63,3 +70,22 @@ def test_cache_command_du_does_not_require_org(tmp_path, monkeypatch, capsys):
     cli.main(["cache", "du"])
 
     assert str(tmp_path / "cache") in capsys.readouterr().out
+
+
+def test_cache_prune_previews_by_default_and_deletes_with_yes(tmp_path, monkeypatch, capsys):
+    remote = make_bare_remote(tmp_path)
+    cache_root = tmp_path / "cache"
+    cache = CloneCache(cache_root)
+    clone = cache.ensure_clone("Acme", "backend", remote_url=f"file://{remote}")
+    (clone / ".pr-metrics.access").write_text("2000-01-01T00:00:00+00:00")
+    monkeypatch.setenv("PR_METRICS_CACHE_DIR", str(cache_root))
+
+    cli.main(["cache", "prune", "--older-than", "1d"])
+
+    assert clone.exists()
+    assert "Would remove 1 clone" in capsys.readouterr().out
+
+    cli.main(["cache", "prune", "--older-than", "1d", "--yes"])
+
+    assert not clone.exists()
+    assert "Removed 1 clone" in capsys.readouterr().out

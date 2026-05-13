@@ -15,7 +15,7 @@ Guardrails:
 
 Hybrid ledger coverage includes:
 
-- `CloneCache` first clone, subsequent fetch, no double-fetch in one run, disk usage, clear, prune, and lock contention.
+- `CloneCache` full `--no-checkout` clone, subsequent fetch, no double-fetch in one run, lock-through-extraction, disk usage, clear, prune preview/delete, and lock contention.
 - `local_git` first-parent commit extraction with `--numstat`, commit-file facts, PR number parsing from `(#NNN)`, freshness checks, and open-PR branch ahead/behind counts.
 - CLI routing from `--ledger-source hybrid` into local-git extraction without changing the default `github` ledger path.
 - JSONL telemetry success/error recording and aggregate summaries.

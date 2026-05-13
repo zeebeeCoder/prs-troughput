@@ -7,6 +7,12 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
+from .paths import resolve_data_lake_dir
+
+
+DEFAULT_OUTPUT_DIR = str(resolve_data_lake_dir())
+DEFAULT_DATA_DIR = f"{DEFAULT_OUTPUT_DIR}/data"
+
 
 STRING_COLUMNS_BY_TABLE = {
     "pr_data": (
@@ -52,7 +58,7 @@ def coerce_table_schema(df, table_name):
     return df
 
 
-def get_partition_path(org, repo, created_at, base_dir="output/data"):
+def get_partition_path(org, repo, created_at, base_dir=DEFAULT_DATA_DIR):
     """Generate Hive-style partition path for a PR
 
     Args:
@@ -87,7 +93,7 @@ def write_rows_to_hive(rows, base_dir, table_name="dataset", partition_by=("org"
         partition_cols = ', '.join(partition_by)
         con.execute(f"""
             COPY {table_name} TO '{base_dir}'
-            (FORMAT PARQUET, PARTITION_BY ({partition_cols}), OVERWRITE_OR_IGNORE)
+            (FORMAT PARQUET, COMPRESSION ZSTD, PARTITION_BY ({partition_cols}), OVERWRITE_OR_IGNORE)
         """)
 
         partitions = {
@@ -99,7 +105,7 @@ def write_rows_to_hive(rows, base_dir, table_name="dataset", partition_by=("org"
         con.close()
 
 
-def write_to_hive(pr_data_list, org, base_dir="output/data"):
+def write_to_hive(pr_data_list, org, base_dir=DEFAULT_DATA_DIR):
     """Write PR data to Hive-partitioned parquet files using DuckDB
 
     Args:
@@ -155,7 +161,7 @@ def _is_missing_parquet_error(error):
     return "No files found" in text or "does not exist" in text
 
 
-def load_from_hive(org=None, repo=None, base_dir="output/data", days_back=None):
+def load_from_hive(org=None, repo=None, base_dir=DEFAULT_DATA_DIR, days_back=None):
     """Load PR data from Hive partitions using DuckDB.
 
     Returns (connection, view_name) or (None, None) if no data exists.
@@ -209,7 +215,7 @@ def load_hive_dataset(dataset_dir, view_name, org=None, repo=None, days_back=Non
         raise
 
 
-def load_from_legacy(org=None, output_dir="output"):
+def load_from_legacy(org=None, output_dir=DEFAULT_OUTPUT_DIR):
     """Load data from legacy timestamped parquet files into DuckDB
 
     Args:
@@ -251,7 +257,7 @@ def load_from_legacy(org=None, output_dir="output"):
     return None, None
 
 
-def load_data(org=None, repo=None, base_dir="output/data", legacy_dir="output", days_back=None):
+def load_data(org=None, repo=None, base_dir=DEFAULT_DATA_DIR, legacy_dir=DEFAULT_OUTPUT_DIR, days_back=None):
     """Smart loader: tries Hive partitions first, falls back to legacy files
 
     Args:

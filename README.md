@@ -64,7 +64,12 @@ uv run pr-metrics --org your-org --full-scan --days 30
 uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger
 uv run pr-metrics --org your-org --repo coto_joy,coto_backend --days 30 --include-ledger
 
-# Bound the full commit event ledger collection across default branch, PR commits, and branch commits
+# Hybrid ledger mode: GitHub for PR/review signals, local cache-owned git clones for commit/file/branch facts
+uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger --ledger-source hybrid
+uv run pr-metrics cache list
+uv run pr-metrics cache du
+
+# Bound the legacy GitHub commit event ledger collection across default branch, PR commits, and branch commits
 uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger \
   --commit-limit 40 --pr-limit 50 --pr-commit-limit 100 --branch-limit 50 --branch-commit-limit 100
 
@@ -78,9 +83,9 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --classify-semanti
 uv run pr-metrics --org your-org --repo backend-api --days 30 --delivery-report
 uv run pr-metrics --org your-org --repo backend-api --days 30 --delivery-report --branch-active-days 14
 
-# Reuse a shared parquet lake outside the current working directory
-uv run pr-metrics --org your-org --days 30 --output-dir ~/.local/share/pr-metrics
-uv run pr-metrics --org your-org --report --terminal --output-dir ~/.local/share/pr-metrics
+# Reuse or override the default XDG parquet lake
+uv run pr-metrics --org your-org --days 30 --output-dir ~/.local/share/pr-metrics/lake
+uv run pr-metrics --org your-org --report --terminal --output-dir ~/.local/share/pr-metrics/lake
 
 # Run reusable DuckDB insight slices over the generated parquet lake
 uv run pr-metrics --list-insights
@@ -100,7 +105,7 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --validate-local ~
 |--------|---------|-------------|
 | `--org ORG` | (required*) | GitHub organization to analyze |
 | `--repo REPO` | None | Filter by specific repository; collection accepts comma-separated names |
-| `--output-dir PATH` | `PR_METRICS_OUTPUT_DIR` or `output` | Directory for the local parquet data lake and CSV backups |
+| `--output-dir PATH` | `PR_METRICS_OUTPUT_DIR` or `${XDG_DATA_HOME:-~/.local/share}/pr-metrics/lake` | Directory for the local parquet data lake and CSV backups |
 | `--days DAYS` | 14 | Number of days back to analyze |
 | `--min-prs N` | 3 | Minimum PRs required to include repo |
 | `--full-scan` | False | Process all repos (slower) |
@@ -108,6 +113,11 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --validate-local ~
 | `--terminal` | False | Rich terminal report with styling |
 | `--top-n N` | 5 | Top contributors in weekly breakdown |
 | `--include-ledger` | False | Collect commit and branch ledger datasets in addition to PRs |
+| `--ledger-source github/hybrid` | github | Ledger source; `hybrid` clones/fetches tool-owned local git caches for commit/file/branch facts |
+| `--cache-dir PATH` | `PR_METRICS_CACHE_DIR` or `${XDG_CACHE_HOME:-~/.cache}/pr-metrics/clones` | Clone cache root for hybrid mode |
+| `--max-concurrency N` | `min(8, repo_count)` | Bounded concurrent repo extraction in hybrid mode |
+| `--full-body` | False | Preserve full commit bodies in hybrid mode; default truncates to 8 KiB |
+| `--allow-stale` | False | Allow hybrid extraction when remote refs are older than the requested `--days` window |
 | `--include-commits` | False | Collect commit event ledger data from default branch, PR commit lists, and branch scans |
 | `--include-branches` | False | Collect remote branch snapshots only |
 | `--commit-limit N` | 100 | Max default-branch commits to collect per repo |
@@ -136,15 +146,18 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --validate-local ~
 
 ### Configuration
 
-Set default organization and shared data lake location via environment variables:
+Set default organization and storage locations via environment variables:
 
 ```bash
 export PR_METRICS_ORG="my-org"
-export PR_METRICS_OUTPUT_DIR="$HOME/.local/share/pr-metrics"
+export PR_METRICS_OUTPUT_DIR="$HOME/.local/share/pr-metrics/lake"
+export PR_METRICS_CACHE_DIR="$HOME/.cache/pr-metrics/clones"
 uv run pr-metrics  # Uses my-org and the shared lake
 uv run pr-metrics --org another-org  # Override the org
 uv run pr-metrics --output-dir ./output  # Override the lake for one run
 ```
+
+Hybrid mode manages clone storage with `uv run pr-metrics cache list|du|prune|clear`.
 
 ### 👥 Contributor Performance Reports
 

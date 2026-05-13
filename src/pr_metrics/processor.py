@@ -8,6 +8,7 @@ import re
 
 import pandas as pd
 
+from .paths import resolve_data_lake_dir
 from .storage import load_data
 from .parsers import (
     classify_activity,
@@ -699,7 +700,7 @@ def process_branches_to_rows(all_branch_data, org):
     return rows
 
 
-def load_latest_data(org=None, output_dir="output", days_back=None, repo=None):
+def load_latest_data(org=None, output_dir=None, days_back=None, repo=None):
     """Load PR data using smart loading strategy
 
     Tries Hive-partitioned data first, falls back to legacy timestamped files.
@@ -713,6 +714,7 @@ def load_latest_data(org=None, output_dir="output", days_back=None, repo=None):
     Returns:
         tuple: (DuckDB connection, view_name) or (None, None)
     """
+    output_dir = str(resolve_data_lake_dir(output_dir)) if output_dir is not None else str(resolve_data_lake_dir())
     # Try loading with smart loader (Hive first with original org name, then legacy with sanitized)
     return load_data(
         org=org,  # Use original org name for Hive partitions

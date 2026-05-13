@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from pr_metrics import cli
+from pr_metrics.paths import resolve_data_lake_dir
 
 
 def test_main_lists_insights(monkeypatch, capsys):
@@ -43,7 +44,7 @@ def test_main_runs_named_insight(monkeypatch, capsys):
 
     assert seen == {
         "name": "traceability",
-        "output_dir": "output",
+        "output_dir": str(resolve_data_lake_dir()),
         "org": "Acme",
         "repo": "backend",
         "days_back": 7,

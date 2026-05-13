@@ -6,17 +6,17 @@ This document describes the **canonical data layer** that outer agents (LLMs, no
 
 ## Layout
 
-By default, data is written under `output/` relative to the CLI working directory. Use `--output-dir PATH` or `PR_METRICS_OUTPUT_DIR` to point multiple CLI runs at a shared lake. Two roots under that output directory:
+By default, data is written under `${XDG_DATA_HOME:-~/.local/share}/pr-metrics/lake`. Use `--output-dir PATH` or `PR_METRICS_OUTPUT_DIR` to point CLI runs at another shared lake. Two roots under that output directory:
 
 | Root | Grain | Notes |
 |---|---|---|
-| `output/data/` | PRs (one row per PR) | Hive partitioned by `org/year/month` |
-| `output/ledger/<grain>/` | commits, branches, etc. | Hive partitioned by `org/year/month` |
+| `<lake>/data/` | PRs (one row per PR) | Hive partitioned by `org/year/month` |
+| `<lake>/ledger/<grain>/` | commits, branches, etc. | Hive partitioned by `org/year/month` |
 
 Hive partitioning means **all parquet readers should use `union_by_name=true`** to handle schema evolution across collection runs:
 
 ```sql
-SELECT * FROM read_parquet('output/ledger/commits/**/*.parquet', union_by_name=true)
+SELECT * FROM read_parquet('/path/to/lake/ledger/commits/**/*.parquet', union_by_name=true)
 ```
 
 ## Canonical `*_latest` views (prefer these)
@@ -25,12 +25,12 @@ SELECT * FROM read_parquet('output/ledger/commits/**/*.parquet', union_by_name=t
 
 | View | Source grain | Dedup key | When to use |
 |---|---|---|---|
-| `prs_latest` | `output/data/` | `(org, repo, pr_number)` | All PR analysis |
-| `commits_latest` | `output/ledger/commits/` | `sha` | All commit analysis |
-| `branches_latest` | `output/ledger/branches/` | `(org, repo, branch)` | Branch / WIP analysis |
-| `delivery_events_latest` | `output/ledger/delivery_events/` | `(org, repo, delivery_sha)` | Lead-time / delivery cadence |
-| `semantic_categories_latest` | `output/ledger/semantic_categories/` | `(unit_id, category, source)` | Multi-source labels |
-| `semantic_embeddings_latest` | `output/ledger/semantic_embeddings/` | `(unit_id, embedding_model)` | Vector search |
+| `prs_latest` | `<lake>/data/` | `(org, repo, pr_number)` | All PR analysis |
+| `commits_latest` | `<lake>/ledger/commits/` | `sha` | All commit analysis |
+| `branches_latest` | `<lake>/ledger/branches/` | `(org, repo, branch)` | Branch / WIP analysis |
+| `delivery_events_latest` | `<lake>/ledger/delivery_events/` | `(org, repo, delivery_sha)` | Lead-time / delivery cadence |
+| `semantic_categories_latest` | `<lake>/ledger/semantic_categories/` | `(unit_id, category, source)` | Multi-source labels |
+| `semantic_embeddings_latest` | `<lake>/ledger/semantic_embeddings/` | `(unit_id, embedding_model)` | Vector search |
 
 These views are bootstrapped via Python — outer agents working in pure SQL should run `views/setup.sql` (which inlines the same dedup logic) before any analysis.
 
@@ -68,7 +68,7 @@ One row per PR. Source: GitHub CLI via `gh`.
 | `collected_at` | timestamp tz | snapshot time |
 
 ### `commits_latest` — Git commits
-One row per `sha`. Source: GitHub commits API + branch scan.
+One row per `sha`. Source: GitHub commits API + branch scan in default `--ledger-source github` mode, or cache-owned local git clones in `--ledger-source hybrid` mode.
 
 | Column | Type | Notes |
 |---|---|---|

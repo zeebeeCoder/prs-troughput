@@ -193,7 +193,7 @@ To collect enhanced data:
 uv run pr-metrics --org 'YourOrg' --days 30
 ```
 
-Data is stored in Hive-partitioned format under `output/data/`.
+Data is stored in Hive-partitioned format under `<lake>/data/`, where the default lake is `${XDG_DATA_HOME:-~/.local/share}/pr-metrics/lake` unless overridden by `--output-dir` / `PR_METRICS_OUTPUT_DIR`.
 
 ## Troubleshooting
 
@@ -203,7 +203,7 @@ Data is stored in Hive-partitioned format under `output/data/`.
 **Solution**:
 1. Check repository name spelling
 2. Collect fresh data: `uv run pr-metrics --org 'YourOrg' --days 30`
-3. Verify data exists: `ls output/data/org=YourOrg/repo=your-repo/`
+3. Verify data exists: `ls ${XDG_DATA_HOME:-$HOME/.local/share}/pr-metrics/lake/data/org=YourOrg/repo=your-repo/` (or your configured `--output-dir`).
 
 ### "Repository name required for contributor report"
 

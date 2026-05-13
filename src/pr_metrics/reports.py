@@ -8,6 +8,8 @@ import pandas as pd
 from tabulate import tabulate
 from rich.console import Console
 from rich.table import Table
+
+from .paths import resolve_data_lake_dir
 from rich.panel import Panel
 from rich import box
 from .queries import (
@@ -887,8 +889,9 @@ def _render_invisible_wip(console, invisible_df):
     console.print(Panel(invisible, title="🫥 Active Invisible WIP", border_style="yellow"))
 
 
-def generate_delivery_report(org=None, repo=None, days_back=14, output_dir="output", branch_active_days=30):
+def generate_delivery_report(org=None, repo=None, days_back=14, output_dir=None, branch_active_days=30):
     """Generate a combined PR + commit + branch delivery ledger report."""
+    output_dir = str(resolve_data_lake_dir(output_dir)) if output_dir is not None else str(resolve_data_lake_dir())
     console = Console()
     pr_con = commits_con = branches_con = None
     try:

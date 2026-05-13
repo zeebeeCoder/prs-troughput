@@ -6,23 +6,32 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
-from datetime import datetime
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 
 from .embeddings import DEFAULT_FIREWORKS_DIMENSIONS, DEFAULT_FIREWORKS_MODEL, create_fireworks_embedding_client
+from .clone_cache import CloneCache
 from .github import (
     ensure_gh_authenticated,
     get_active_repos_from_search,
+    get_gh_call_count,
+    get_open_pr_branch_map,
     get_org_repos,
     get_repo_branch_commits,
     get_repo_branches,
     get_repo_commits,
     get_repo_pr_commits,
     get_repo_prs,
+    reset_gh_call_count,
 )
 from .insights import INSIGHTS, create_delivery_lake_views, render_dataframe, run_insight
+from . import local_git
+from .paths import resolve_cache_dir, resolve_data_lake_dir
 from .processor import (
     load_latest_data,
     process_branches_to_rows,
@@ -41,7 +50,7 @@ from .utils import resolve_org, sanitize_org_name
 from .validation import validate_local_repo
 
 
-OUTPUT_DIR = "output"
+OUTPUT_DIR = str(resolve_data_lake_dir())
 
 
 def _select_repos(args, org):
@@ -137,8 +146,25 @@ def _collect_prs(args, org, repos):
     return pr_rows
 
 
-def _collect_commit_ledger(args, org, repos):
-    """Collect and persist commit ledger rows across default, PR, and branch sources."""
+def _clone_cache_from_args(args):
+    """Return a per-invocation CloneCache so commits/branches do not double-fetch."""
+    cache = getattr(args, "_clone_cache", None)
+    if cache is None:
+        cache = CloneCache(resolve_cache_dir(getattr(args, "cache_dir", None)))
+        setattr(args, "_clone_cache", cache)
+    return cache
+
+
+def _max_workers(args, repos):
+    """Resolve bounded repo-level concurrency."""
+    configured = getattr(args, "max_concurrency", None)
+    if configured:
+        return max(1, configured)
+    return max(1, min(8, len(repos)))
+
+
+def _collect_commit_ledger_github(args, org, repos):
+    """Collect commit ledger rows via the legacy GitHub API path."""
     all_commits_data = {}
     for i, repo in enumerate(repos, 1):
         repo_name = repo['name']
@@ -169,6 +195,53 @@ def _collect_commit_ledger(args, org, repos):
         ))
         if commits:
             all_commits_data[repo_name] = commits
+    return all_commits_data
+
+
+def _extract_local_commits_for_repo(args, org, repo_name, cache, stats):
+    """Ensure a cached clone and extract local commit facts for one repo."""
+    clone = cache.ensure_clone(org, repo_name)
+    local_git.ensure_fresh_refs(
+        clone,
+        args.days,
+        allow_stale=getattr(args, "allow_stale", False),
+        stats=stats,
+    )
+    return repo_name, local_git.extract_commits(
+        clone,
+        days_back=args.days,
+        full_body=getattr(args, "full_body", False),
+        stats=stats,
+    )
+
+
+def _collect_commit_ledger_hybrid(args, org, repos):
+    """Collect commit ledger rows from cache-owned local git clones."""
+    cache = _clone_cache_from_args(args)
+    stats = getattr(args, "_git_stats", None) or local_git.GitCommandStats()
+    setattr(args, "_git_stats", stats)
+    print(f"🧊 Using clone cache: {cache.cache_root}")
+    all_commits_data = {}
+    with ThreadPoolExecutor(max_workers=_max_workers(args, repos)) as executor:
+        futures = {
+            executor.submit(_extract_local_commits_for_repo, args, org, repo['name'], cache, stats): repo['name']
+            for repo in repos
+        }
+        for index, future in enumerate(as_completed(futures), 1):
+            repo_name = futures[future]
+            print(f"  {index}/{len(repos)} local commits: {repo_name}")
+            name, commits = future.result()
+            if commits:
+                all_commits_data[name] = commits
+    return all_commits_data
+
+
+def _collect_commit_ledger(args, org, repos):
+    """Collect and persist commit ledger rows across configured sources."""
+    if getattr(args, "ledger_source", "github") == "hybrid":
+        all_commits_data = _collect_commit_ledger_hybrid(args, org, repos)
+    else:
+        all_commits_data = _collect_commit_ledger_github(args, org, repos)
 
     commit_rows, file_rows, link_rows, delivery_rows = process_commit_ledger_to_rows(all_commits_data, org)
     write_rows_to_hive(commit_rows, f"{OUTPUT_DIR}/ledger/commits", table_name="commits")
@@ -178,15 +251,51 @@ def _collect_commit_ledger(args, org, repos):
         write_rows_to_hive(file_rows, f"{OUTPUT_DIR}/ledger/commit_files", table_name="commit_files")
 
 
+def _extract_local_branches_for_repo(args, org, repo_name, cache, stats):
+    """Ensure a cached clone and extract open-PR branch facts for one repo."""
+    clone = cache.ensure_clone(org, repo_name)
+    open_prs = get_open_pr_branch_map(org, repo_name, limit=getattr(args, "pr_limit", 100))
+    local_git.ensure_fresh_refs(
+        clone,
+        args.days,
+        allow_stale=getattr(args, "allow_stale", False),
+        stats=stats,
+    )
+    return repo_name, local_git.extract_branches(clone, open_pr_branch_map=open_prs, stats=stats)
+
+
+def _collect_branch_ledger_hybrid(args, org, repos):
+    """Collect branch rows from local refs, enriched by open PR metadata."""
+    cache = _clone_cache_from_args(args)
+    stats = getattr(args, "_git_stats", None) or local_git.GitCommandStats()
+    setattr(args, "_git_stats", stats)
+    all_branch_data = {}
+    with ThreadPoolExecutor(max_workers=_max_workers(args, repos)) as executor:
+        futures = {
+            executor.submit(_extract_local_branches_for_repo, args, org, repo['name'], cache, stats): repo['name']
+            for repo in repos
+        }
+        for index, future in enumerate(as_completed(futures), 1):
+            repo_name = futures[future]
+            print(f"  {index}/{len(repos)} local branches: {repo_name}")
+            name, branches = future.result()
+            if branches:
+                all_branch_data[name] = branches
+    return all_branch_data
+
+
 def _collect_branch_ledger(args, org, repos):
     """Collect and persist remote branch snapshot rows."""
-    all_branch_data = {}
-    for i, repo in enumerate(repos, 1):
-        repo_name = repo['name']
-        print(f"  {i}/{len(repos)} branches: {repo_name}")
-        branches = get_repo_branches(org, repo_name, limit=args.branch_limit)
-        if branches:
-            all_branch_data[repo_name] = branches
+    if getattr(args, "ledger_source", "github") == "hybrid":
+        all_branch_data = _collect_branch_ledger_hybrid(args, org, repos)
+    else:
+        all_branch_data = {}
+        for i, repo in enumerate(repos, 1):
+            repo_name = repo['name']
+            print(f"  {i}/{len(repos)} branches: {repo_name}")
+            branches = get_repo_branches(org, repo_name, limit=args.branch_limit)
+            if branches:
+                all_branch_data[repo_name] = branches
 
     branch_rows = process_branches_to_rows(all_branch_data, org)
     write_rows_to_hive(branch_rows, f"{OUTPUT_DIR}/ledger/branches", table_name="branches")
@@ -266,6 +375,8 @@ def _collect_ledger(args, org, repos):
     if not (include_commits or include_branches or include_semantics):
         return
 
+    started = time.monotonic()
+    reset_gh_call_count()
     Path(f"{OUTPUT_DIR}/ledger").mkdir(parents=True, exist_ok=True)
     if include_commits:
         _collect_commit_ledger(args, org, repos)
@@ -273,6 +384,22 @@ def _collect_ledger(args, org, repos):
         _collect_branch_ledger(args, org, repos)
     if include_semantics:
         _classify_semantics(args, org)
+    _print_extraction_summary(args, started)
+
+
+def _print_extraction_summary(args, started):
+    """Print a compact extraction summary for ledger runs."""
+    elapsed = time.monotonic() - started
+    cache = getattr(args, "_clone_cache", None)
+    stats = getattr(args, "_git_stats", None)
+    cloned = cache.cloned_count if cache else 0
+    fetched = cache.fetched_count if cache else 0
+    git_commands = stats.commands if stats else 0
+    print(
+        "📊 Extraction summary: "
+        f"elapsed={elapsed:.1f}s gh_calls={get_gh_call_count()} "
+        f"local_git_commands={git_commands} cloned={cloned} fetched={fetched}"
+    )
 
 
 
@@ -288,9 +415,14 @@ def _build_parser():
     parser.add_argument('--org', type=str, help='GitHub organization to analyze (overrides default)')
     parser.add_argument('--repo', type=str, help='Filter by repository name; collection accepts comma-separated names')
     parser.add_argument('--output-dir', default=None,
-                        help='Directory for the local parquet data lake and CSV backups (default: PR_METRICS_OUTPUT_DIR or output)')
+                        help='Directory for the local parquet data lake and CSV backups (default: PR_METRICS_OUTPUT_DIR or XDG data home)')
     parser.add_argument('--top-n', type=int, default=5, help='Number of top contributors to show individual weekly breakdowns (default: 5)')
     parser.add_argument('--include-ledger', action='store_true', help='Collect commits and branches in addition to PRs')
+    parser.add_argument('--ledger-source', choices=('github', 'hybrid'), default='github', help='Ledger data source: github API path or hybrid GitHub signals + local git facts (default: github)')
+    parser.add_argument('--cache-dir', default=None, help='Clone cache root for --ledger-source hybrid (default: PR_METRICS_CACHE_DIR or XDG cache home)')
+    parser.add_argument('--max-concurrency', type=int, default=None, help='Maximum concurrent repo extractions for hybrid mode (default: min(8, repo_count))')
+    parser.add_argument('--full-body', action='store_true', help='Preserve full commit bodies in hybrid mode (default truncates to 8 KiB)')
+    parser.add_argument('--allow-stale', action='store_true', help='Allow hybrid extraction when remote refs are older than the --days window')
     parser.add_argument('--include-commits', action='store_true', help='Collect commit event ledger data from default branch, PR commit lists, and branch scans')
     parser.add_argument('--include-branches', action='store_true', help='Collect remote branch snapshot data')
     parser.add_argument('--commit-limit', type=int, default=100, help='Max default-branch commits to collect per repo (default: 100)')
@@ -497,11 +629,75 @@ def _handle_collection(args, org):
 def _apply_output_dir(args):
     """Resolve and apply the process-wide output directory for this CLI invocation."""
     global OUTPUT_DIR
-    OUTPUT_DIR = args.output_dir or os.getenv("PR_METRICS_OUTPUT_DIR") or OUTPUT_DIR
+    OUTPUT_DIR = str(resolve_data_lake_dir(args.output_dir))
+
+
+def _format_bytes(value):
+    """Return a compact human-readable byte count."""
+    units = ("B", "KiB", "MiB", "GiB")
+    size = float(value)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+
+
+def _parse_age(value):
+    """Parse a simple age string such as 30d, 12h, or seconds."""
+    text = str(value).strip().lower()
+    if text.endswith("d"):
+        return timedelta(days=int(text[:-1]))
+    if text.endswith("h"):
+        return timedelta(hours=int(text[:-1]))
+    return timedelta(seconds=int(text))
+
+
+def _build_cache_parser():
+    """Create parser for `pr-metrics cache ...` management commands."""
+    cache_parent = argparse.ArgumentParser(add_help=False)
+    cache_parent.add_argument("--cache-dir", default=None, help="Clone cache root override")
+    parser = argparse.ArgumentParser(description="Manage pr-metrics clone cache", parents=[cache_parent])
+    sub = parser.add_subparsers(dest="cache_command", required=True)
+    sub.add_parser("list", parents=[cache_parent], help="List cached clones")
+    sub.add_parser("du", parents=[cache_parent], help="Show cache disk usage")
+    prune = sub.add_parser("prune", parents=[cache_parent], help="Remove clones older than an age, e.g. 30d")
+    prune.add_argument("--older-than", required=True)
+    clear = sub.add_parser("clear", parents=[cache_parent], help="Clear all cached clones or a subset")
+    clear.add_argument("--org", default=None)
+    clear.add_argument("--repo", default=None)
+    return parser
+
+
+def _handle_cache_command(argv):
+    """Handle `pr-metrics cache ...` without requiring org/auth."""
+    parser = _build_cache_parser()
+    args = parser.parse_args(argv)
+    cache = CloneCache(resolve_cache_dir(args.cache_dir))
+    if args.cache_command == "list":
+        for clone in cache.iter_cached_clones():
+            accessed = clone.last_accessed.isoformat() if clone.last_accessed else "unknown"
+            print(f"{clone.org}/{clone.repo}\t{_format_bytes(clone.bytes_used)}\t{accessed}\t{clone.path}")
+    elif args.cache_command == "du":
+        print(f"{_format_bytes(cache.du())}\t{cache.cache_root}")
+    elif args.cache_command == "prune":
+        removed = cache.prune(_parse_age(args.older_than))
+        for path in removed:
+            print(f"removed\t{path}")
+        print(f"Removed {len(removed)} clone(s)")
+    elif args.cache_command == "clear":
+        removed = cache.clear(org=args.org, repo=args.repo)
+        for path in removed:
+            print(f"removed\t{path}")
+        print(f"Removed {len(removed)} clone(s)")
 
 
 def main(argv=None):
     """Main CLI entry point."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "cache":
+        _handle_cache_command(argv[1:])
+        return
+
     parser = _build_parser()
     args = parser.parse_args(argv)
     _apply_output_dir(args)

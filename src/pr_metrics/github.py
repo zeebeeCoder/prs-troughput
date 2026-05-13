@@ -13,6 +13,20 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 
+GH_CALL_COUNT = 0
+
+
+def reset_gh_call_count():
+    """Reset the process-local gh command counter used in extraction summaries."""
+    global GH_CALL_COUNT
+    GH_CALL_COUNT = 0
+
+
+def get_gh_call_count():
+    """Return the number of gh commands run in this process."""
+    return GH_CALL_COUNT
+
+
 def ensure_gh_authenticated():
     """Return a human-readable error when GitHub CLI is missing or unauthenticated."""
     if shutil.which("gh") is None:
@@ -41,6 +55,8 @@ def run_gh_command(cmd, max_retries=3, initial_delay=2):
     Returns:
         JSON parsed result or empty list on failure
     """
+    global GH_CALL_COUNT
+    GH_CALL_COUNT += 1
     for attempt in range(max_retries):
         try:
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)

@@ -162,6 +162,7 @@ $RECYCLE.BIN/
 *~
 
 # Project specific
+.ralph/
 output/
 output.snapshot*/
 *.csv

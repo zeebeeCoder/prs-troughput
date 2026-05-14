@@ -21,7 +21,7 @@ class FakeCache:
         yield self.ensure_clone(org, repo)
 
 
-def test_collect_commit_ledger_routes_hybrid_to_local_git(tmp_path, monkeypatch):
+def test_collect_commit_ledger_auto_routes_to_local_git(tmp_path, monkeypatch):
     written = []
     fake_cache = FakeCache(tmp_path / "cache")
 
@@ -47,7 +47,7 @@ def test_collect_commit_ledger_routes_hybrid_to_local_git(tmp_path, monkeypatch)
     monkeypatch.setattr(cli, "write_rows_to_hive", lambda rows, base_dir, table_name: written.append((table_name, rows, base_dir)))
 
     args = SimpleNamespace(
-        ledger_source="hybrid",
+        ledger_source="auto",
         cache_dir=str(tmp_path / "cache"),
         max_concurrency=1,
         days=30,

@@ -68,7 +68,7 @@ One row per PR. Source: GitHub CLI via `gh`.
 | `collected_at` | timestamp tz | snapshot time |
 
 ### `commits_latest` — Git commits
-One row per `sha`. Source: GitHub commits API + branch scan in default `--ledger-source github` mode, or cache-owned local git clones in `--ledger-source hybrid` mode.
+One row per `sha`. Source: cache-owned local git clones during normal ledger collection, with GitHub retained for high-level PR/review/CI signals. A legacy GitHub-only ledger source exists only as a debugging fallback.
 
 | Column | Type | Notes |
 |---|---|---|

@@ -13,11 +13,11 @@ Guardrails:
 - No test requires GitHub credentials or network access.
 - XDG and `PR_METRICS_*` path tests monkeypatch environment variables and only write under `tmp_path`.
 
-Hybrid ledger coverage includes:
+Ledger coverage includes:
 
 - `CloneCache` full `--no-checkout` clone, subsequent fetch, no double-fetch in one run, lock-through-extraction, disk usage, clear, prune preview/delete, and lock contention.
 - `local_git` first-parent commit extraction with `--numstat`, commit-file facts, PR number parsing from `(#NNN)`, freshness checks, and open-PR branch ahead/behind counts.
-- CLI routing from `--ledger-source hybrid` into local-git extraction without changing the default `github` ledger path.
+- CLI routing from default ledger collection into local-git extraction, while keeping a hidden GitHub-source fallback for debugging.
 - JSONL telemetry success/error recording and aggregate summaries.
 
 Benchmarking the real 18-repo Eve-World workload remains manual/opt-in because it requires network and local cache state. Record wall time against the 848.8s GitHub-heavy baseline when running it.

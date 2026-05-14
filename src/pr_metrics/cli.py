@@ -278,9 +278,19 @@ def _write_rows_with_telemetry(rows, base_dir, table_name, telemetry=None):
         write_rows_to_hive(rows, base_dir, table_name=table_name)
 
 
+def _resolved_ledger_source(args):
+    """Resolve the implementation source for ledger facts.
+
+    Users ask for ledger breadth; the tool chooses the fastest precise source by
+    default. `--ledger-source` remains as a hidden escape hatch for debugging.
+    """
+    source = getattr(args, "ledger_source", "auto") or "auto"
+    return "hybrid" if source == "auto" else source
+
+
 def _collect_commit_ledger(args, org, repos):
     """Collect and persist commit ledger rows across configured sources."""
-    if getattr(args, "ledger_source", "github") == "hybrid":
+    if _resolved_ledger_source(args) == "hybrid":
         all_commits_data = _collect_commit_ledger_hybrid(args, org, repos)
     else:
         all_commits_data = _collect_commit_ledger_github(args, org, repos)
@@ -355,7 +365,7 @@ def _collect_branch_ledger_hybrid(args, org, repos):
 
 def _collect_branch_ledger(args, org, repos):
     """Collect and persist remote branch snapshot rows."""
-    if getattr(args, "ledger_source", "github") == "hybrid":
+    if _resolved_ledger_source(args) == "hybrid":
         all_branch_data = _collect_branch_ledger_hybrid(args, org, repos)
     else:
         all_branch_data = {}
@@ -494,11 +504,11 @@ def _build_parser():
     parser.add_argument('--output-dir', default=None,
                         help='Directory for the local parquet data lake and CSV backups (default: PR_METRICS_OUTPUT_DIR or XDG data home)')
     parser.add_argument('--top-n', type=int, default=5, help='Number of top contributors to show individual weekly breakdowns (default: 5)')
-    parser.add_argument('--include-ledger', action='store_true', help='Collect commits and branches in addition to PRs')
-    parser.add_argument('--ledger-source', choices=('github', 'hybrid'), default='github', help='Ledger data source: github API path or hybrid GitHub signals + local git facts (default: github)')
-    parser.add_argument('--cache-dir', default=None, help='Clone cache root for --ledger-source hybrid (default: PR_METRICS_CACHE_DIR or XDG cache home)')
-    parser.add_argument('--max-concurrency', type=int, default=None, help='Maximum concurrent repo extractions for hybrid mode (default: min(8, repo_count))')
-    parser.add_argument('--full-body', action='store_true', help='Preserve full commit bodies in hybrid mode (default truncates to 8 KiB)')
+    parser.add_argument('--include-ledger', action='store_true', help='Collect commit, file, branch, and delivery-event facts in addition to PRs')
+    parser.add_argument('--ledger-source', choices=('auto', 'github', 'hybrid'), default='auto', help=argparse.SUPPRESS)
+    parser.add_argument('--cache-dir', default=None, help='Clone cache root for ledger collection (default: PR_METRICS_CACHE_DIR or XDG cache home)')
+    parser.add_argument('--max-concurrency', type=int, default=None, help='Maximum concurrent repo extractions for ledger collection (default: min(8, repo_count))')
+    parser.add_argument('--full-body', action='store_true', help='Preserve full commit bodies in ledger mode (default truncates to 8 KiB)')
     parser.add_argument('--allow-stale', action='store_true', help='Allow hybrid extraction when remote refs are older than the --days window')
     parser.add_argument('--no-telemetry', dest='telemetry', action='store_false', help='Disable JSONL phase telemetry for collection runs')
     parser.set_defaults(telemetry=True)

@@ -64,6 +64,14 @@ def test_collect_commit_ledger_auto_routes_to_local_git(tmp_path, monkeypatch):
     assert tables["delivery_events"][0]["pr_number"] == 9
 
 
+def test_help_hides_data_source_decisions():
+    help_text = cli._build_parser().format_help()
+
+    assert "--prs-only" in help_text
+    assert "--include-ledger" not in help_text
+    assert "--ledger-source" not in help_text
+
+
 def test_cache_command_du_does_not_require_org(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("PR_METRICS_CACHE_DIR", str(tmp_path / "cache"))
 

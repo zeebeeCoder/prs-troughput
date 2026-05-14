@@ -33,7 +33,6 @@ For one-off analysis, override the lake explicitly:
 
 ```bash
 uv run pr-metrics --org ORG --repo REPO --days 30 \
-  --include-ledger \
   --output-dir ~/.local/share/pr-metrics/lake
 
 uv run pr-metrics --org ORG --repo REPO --insight kinetics_weekly --days 30 \
@@ -44,7 +43,7 @@ Or make it the default for a shell/session:
 
 ```bash
 export PR_METRICS_OUTPUT_DIR="$HOME/.local/share/pr-metrics/lake"
-uv run pr-metrics --org ORG --repo REPO --days 30 --include-ledger
+uv run pr-metrics --org ORG --repo REPO --days 30
 uv run pr-metrics --org ORG --repo REPO --report --terminal
 ```
 
@@ -52,16 +51,17 @@ When running bespoke DuckDB/Python analysis outside the CLI, point setup/query c
 
 ## Refreshing data / CLI defaults
 
-For fresh delivery intelligence, ask for breadth, not an implementation source:
+For fresh delivery intelligence, ask for the scope/window only; the tool collects PRs plus commit/file/branch facts by default:
 
 ```bash
-uv run pr-metrics --org ORG --repo REPO --days 30 --include-ledger
+uv run pr-metrics --org ORG --repo REPO --days 30
 ```
 
 Operational notes:
 
 - The tool automatically uses GitHub for PR/review/CI signals and cached local git clones for precise commit/file/branch facts.
-- Ledger mode stores full `--no-checkout` clones under `${XDG_CACHE_HOME:-~/.cache}/pr-metrics/clones` unless `--cache-dir` / `PR_METRICS_CACHE_DIR` is set.
+- Collection stores full `--no-checkout` clones under `${XDG_CACHE_HOME:-~/.cache}/pr-metrics/clones` unless `--cache-dir` / `PR_METRICS_CACHE_DIR` is set.
+- `--prs-only` is the rare escape hatch when a user explicitly wants PR rows without commit/file/branch facts.
 - `pr-metrics cache du` reports cache footprint.
 - `pr-metrics cache prune --older-than 30d` previews by default; add `--yes` to delete.
 - Telemetry is on by default at `<lake>/telemetry/runs/<run_id>.jsonl`; pass `--no-telemetry` only for noise-sensitive local runs.

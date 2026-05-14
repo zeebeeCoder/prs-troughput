@@ -448,9 +448,10 @@ def _classify_semantics(args, org):
 
 
 def _collect_ledger(args, org, repos):
-    """Collect optional Git delivery ledger datasets."""
-    include_commits = args.include_ledger or args.include_commits
-    include_branches = args.include_ledger or args.include_branches
+    """Collect Git delivery ledger datasets unless explicitly scoped to PRs only."""
+    default_ledger = not getattr(args, "prs_only", False)
+    include_commits = default_ledger or args.include_ledger or args.include_commits
+    include_branches = default_ledger or args.include_ledger or args.include_branches
     include_semantics = args.classify_semantics
 
     if not (include_commits or include_branches or include_semantics):
@@ -504,7 +505,8 @@ def _build_parser():
     parser.add_argument('--output-dir', default=None,
                         help='Directory for the local parquet data lake and CSV backups (default: PR_METRICS_OUTPUT_DIR or XDG data home)')
     parser.add_argument('--top-n', type=int, default=5, help='Number of top contributors to show individual weekly breakdowns (default: 5)')
-    parser.add_argument('--include-ledger', action='store_true', help='Collect commit, file, branch, and delivery-event facts in addition to PRs')
+    parser.add_argument('--include-ledger', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--prs-only', action='store_true', help='Collect only PR rows; skip commit, file, branch, and delivery-event facts')
     parser.add_argument('--ledger-source', choices=('auto', 'github', 'hybrid'), default='auto', help=argparse.SUPPRESS)
     parser.add_argument('--cache-dir', default=None, help='Clone cache root for ledger collection (default: PR_METRICS_CACHE_DIR or XDG cache home)')
     parser.add_argument('--max-concurrency', type=int, default=None, help='Maximum concurrent repo extractions for ledger collection (default: min(8, repo_count))')

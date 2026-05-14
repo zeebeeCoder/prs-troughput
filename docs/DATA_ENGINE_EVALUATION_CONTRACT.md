@@ -22,22 +22,16 @@ uv run pr-metrics --org NFHotelAI --insight active_repos --days 120
 
 ## Refresh commands
 
-Use bounded commit/branch limits while the GitHub API cost profile is still being validated:
+Use the default full delivery collection; tune concurrency only if the local machine or network needs a lower ceiling:
 
 ```bash
 uv run pr-metrics --org Eve-World-Platform \
   --repo coto-joy \
-  --days 30 \
-  --include-ledger \
-  --commit-limit 40 \
-  --branch-limit 50
+  --days 30
 
 uv run pr-metrics --org NFHotelAI \
   --repo nfhotel_backend,nfhotel_frontend,nf_next \
-  --days 30 \
-  --include-ledger \
-  --commit-limit 40 \
-  --branch-limit 50
+  --days 30
 ```
 
 ## Required insight slices

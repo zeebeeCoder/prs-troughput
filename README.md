@@ -48,7 +48,7 @@ That's it! `uv` automatically handles all dependencies.
 # Collect data for organization (last 14 days)
 uv run pr-metrics --org your-org
 
-# Collect data for last 30 days
+# Collect full delivery data for last 30 days (PRs + commit/file/branch facts)
 uv run pr-metrics --org your-org --days 30
 
 # Generate organization-wide terminal report
@@ -60,21 +60,24 @@ uv run pr-metrics --org your-org --repo backend-api --days 60 --report --termina
 # Full repository scan (slower, more complete)
 uv run pr-metrics --org your-org --full-scan --days 30
 
-# Collect PRs plus commit/branch ledger data for one or more repositories
-uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger
-uv run pr-metrics --org your-org --repo coto_joy,coto_backend --days 30 --include-ledger
+# Scope collection to one or more repositories
+uv run pr-metrics --org your-org --repo backend-api --days 30
+uv run pr-metrics --org your-org --repo coto_joy,coto_backend --days 30
 
-# The tool automatically uses cached local git facts for fast, precise ledger collection
+# The tool automatically uses cached local git facts for fast, precise delivery facts
 uv run pr-metrics cache list
 uv run pr-metrics cache du
 uv run pr-metrics cache prune --older-than 30d       # preview by default
 uv run pr-metrics cache prune --older-than 30d --yes # delete matches
 
 # Collection runs write phase telemetry to <lake>/telemetry/runs/<run_id>.jsonl by default
-uv run pr-metrics --org your-org --repo backend-api --days 30 --include-ledger --no-telemetry  # opt out
+uv run pr-metrics --org your-org --repo backend-api --days 30 --no-telemetry  # opt out
 
 # Tune concurrent repo extraction if your machine or network needs a lower ceiling
-uv run pr-metrics --org your-org --repo backend-api,frontend-web --days 30 --include-ledger --max-concurrency 4
+uv run pr-metrics --org your-org --repo backend-api,frontend-web --days 30 --max-concurrency 4
+
+# Rare escape hatch: collect PR rows only, skipping commit/file/branch facts
+uv run pr-metrics --org your-org --repo backend-api --days 30 --prs-only
 
 # Persist deterministic semantic category facts for collected PR/commit/branch rows
 uv run pr-metrics --org your-org --repo backend-api --days 30 --classify-semantics
@@ -115,14 +118,14 @@ uv run pr-metrics --org your-org --repo backend-api --days 30 --validate-local ~
 | `--report` | False | Generate report from existing data |
 | `--terminal` | False | Rich terminal report with styling |
 | `--top-n N` | 5 | Top contributors in weekly breakdown |
-| `--include-ledger` | False | Collect commit, file, branch, and delivery-event datasets in addition to PRs; the tool automatically chooses cached local git for precise low-latency facts |
+| `--prs-only` | False | Collect only PR rows; by default collection includes commit, file, branch, and delivery-event facts |
 | `--cache-dir PATH` | `PR_METRICS_CACHE_DIR` or `${XDG_CACHE_HOME:-~/.cache}/pr-metrics/clones` | Clone cache root for ledger collection |
 | `--max-concurrency N` | `min(8, repo_count)` | Bounded concurrent repo extraction for ledger collection |
 | `--full-body` | False | Preserve full commit bodies in ledger mode; default truncates to 8 KiB |
 | `--allow-stale` | False | Allow hybrid extraction when remote refs are older than the requested `--days` window |
 | `--no-telemetry` | False | Disable default JSONL phase telemetry under `<lake>/telemetry/runs/` |
-| `--include-commits` | False | Collect commit event ledger data from default branch, PR commit lists, and branch scans |
-| `--include-branches` | False | Collect remote branch snapshots only |
+| `--include-commits` | False | Advanced: collect commit event facts even with `--prs-only` |
+| `--include-branches` | False | Advanced: collect branch snapshots even with `--prs-only` |
 | `--commit-limit N` | 100 | Max default-branch commits to collect per repo |
 | `--pr-limit N` | 100 | Max recent PRs whose commit lists are collected per repo |
 | `--pr-commit-limit N` | 100 | Max commits to collect per PR via the PR commits API |
